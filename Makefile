@@ -40,10 +40,13 @@ iso: $(KERNEL_ELF)
 	@mkdir -p $(BOOT_DIR)/grub
 	cp $(KERNEL_ELF) $(BOOT_DIR)/kernel.elf
 	cp boot/grub.cfg $(BOOT_DIR)/grub/grub.cfg
-	grub-mkrescue -o $(ISO_IMAGE) $(ISO_DIR)
+	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(ISO_IMAGE) $(ISO_DIR) 2>&1 | grep -v "xorriso"
 
 run: iso
-	qemu-system-$(ARCH) -cdrom $(ISO_IMAGE)
+	qemu-system-$(ARCH) -cdrom $(ISO_IMAGE) -boot d -m 512M
+
+run-hd: iso
+	qemu-system-$(ARCH) -hda $(ISO_IMAGE) -m 512M
 
 clean:
 	rm -rf build

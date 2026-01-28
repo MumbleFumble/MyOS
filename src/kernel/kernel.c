@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include "arch/idt.h"
+#include "arch/irq.h"
+#include "arch/timer.h"
 #include "mem/multiboot.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
@@ -28,10 +30,9 @@ static void print_hex64(volatile uint16_t *video, int offset, uint64_t value) {
 __attribute__((noreturn))
 void kernel_main(struct multiboot_info *mb_info)
 {
-    clear_screen(0x00);  // Black background
-    
     volatile uint16_t *video = (uint16_t *)0xB8000;
     
+    // Don't clear screen yet - just overwrite BIOS text
     const char *msg = "MyOS 64-bit | MB ptr=";
     int pos = 0;
     for (int i = 0; msg[i] != '\0'; ++i, ++pos) {
@@ -42,9 +43,9 @@ void kernel_main(struct multiboot_info *mb_info)
     print_hex64(video, pos, (uint64_t)mb_info);
     pos += 16;
     
-    /* Check if pointer looks valid (should be < 4MB based on our identity map) */
+    /* Check if pointer looks valid (should be < 16MB based on our identity map) */
     video[pos++] = (0x0F << 8) | ' ';
-    if ((uint64_t)mb_info < 0x400000) {
+    if ((uint64_t)mb_info < 0x1000000) {
         const char *status = "OK";
         for (int i = 0; status[i] != '\0'; ++i, ++pos) {
             video[pos] = (0x0A << 8) | status[i];  /* Green */
@@ -57,25 +58,27 @@ void kernel_main(struct multiboot_info *mb_info)
     }
 
     idt_init();
+    irq_init();
+    timer_init();
 
     // Test extended identity mapping first
-    video[VGA_COLS] = (0x0A << 8) | 'I';
-    video[VGA_COLS+1] = (0x0A << 8) | 'd';
-    video[VGA_COLS+2] = (0x0A << 8) | 'e';
-    video[VGA_COLS+3] = (0x0A << 8) | 'n';
-    video[VGA_COLS+4] = (0x0A << 8) | 't';
-    video[VGA_COLS+5] = (0x0A << 8) | 'i';
-    video[VGA_COLS+6] = (0x0A << 8) | 't';
-    video[VGA_COLS+7] = (0x0A << 8) | 'y';
-    video[VGA_COLS+8] = (0x0A << 8) | ' ';
-    video[VGA_COLS+9] = (0x0A << 8) | 'm';
-    video[VGA_COLS+10] = (0x0A << 8) | 'a';
-    video[VGA_COLS+11] = (0x0A << 8) | 'p';
-    video[VGA_COLS+12] = (0x0A << 8) | ' ';
-    video[VGA_COLS+13] = (0x0A << 8) | '1';
-    video[VGA_COLS+14] = (0x0A << 8) | '6';
-    video[VGA_COLS+15] = (0x0A << 8) | 'M';
-    video[VGA_COLS+16] = (0x0A << 8) | 'B';
+    video[VGA_COLS+13] = (0x0A << 8) | 'I';
+    video[VGA_COLS+14] = (0x0A << 8) | 'd';
+    video[VGA_COLS+15] = (0x0A << 8) | 'e';
+    video[VGA_COLS+16] = (0x0A << 8) | 'n';
+    video[VGA_COLS+17] = (0x0A << 8) | 't';
+    video[VGA_COLS+18] = (0x0A << 8) | 'i';
+    video[VGA_COLS+19] = (0x0A << 8) | 't';
+    video[VGA_COLS+20] = (0x0A << 8) | 'y';
+    video[VGA_COLS+21] = (0x0A << 8) | ' ';
+    video[VGA_COLS+22] = (0x0A << 8) | 'm';
+    video[VGA_COLS+23] = (0x0A << 8) | 'a';
+    video[VGA_COLS+24] = (0x0A << 8) | 'p';
+    video[VGA_COLS+25] = (0x0A << 8) | ' ';
+    video[VGA_COLS+26] = (0x0A << 8) | '1';
+    video[VGA_COLS+27] = (0x0A << 8) | '6';
+    video[VGA_COLS+28] = (0x0A << 8) | 'M';
+    video[VGA_COLS+29] = (0x0A << 8) | 'B';
     
     // Parse multiboot info
     struct memory_map memmap;
@@ -92,12 +95,31 @@ void kernel_main(struct multiboot_info *mb_info)
     char digit = '0' + (memmap.region_count % 10);
     video[VGA_COLS+26] = (0x0A << 8) | digit;
     
+    // Memory management disabled for now - causes crash
     // pmm_init(&memmap);
     // vmm_init();
     // kheap_init(&memmap);
 
+    // Display timer ticks to show interrupts are working
+    video[VGA_COLS*2] = (0x0F << 8) | 'T';
+    video[VGA_COLS*2+1] = (0x0F << 8) | 'i';
+    video[VGA_COLS*2+2] = (0x0F << 8) | 'm';
+    video[VGA_COLS*2+3] = (0x0F << 8) | 'e';
+    video[VGA_COLS*2+4] = (0x0F << 8) | 'r';
+    video[VGA_COLS*2+5] = (0x0F << 8) | ':';
+    video[VGA_COLS*2+6] = (0x0F << 8) | ' ';
+
     for (;;)
     {
-        __asm__("hlt");
+        uint32_t ticks = timer_ticks();
+        
+        // Display tick count in hex (8 digits)
+        for (int i = 7; i >= 0; i--) {
+            uint8_t nibble = (ticks >> (i * 4)) & 0xF;
+            char c = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            video[VGA_COLS*2 + 7 + (7-i)] = (0x0A << 8) | c;
+        }
+        
+        __asm__ volatile("hlt");
     }
 }

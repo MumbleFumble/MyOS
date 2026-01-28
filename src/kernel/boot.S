@@ -1,22 +1,16 @@
-/* Multiboot2 header + 64-bit long mode entry */
+/* Multiboot1 header + 64-bit long mode entry */
 
     .section .multiboot_header,"a"
-    .align 8
+    .align 4
 
-    .set MB2_MAGIC,      0xE85250D6
-    .set MB2_ARCH_I386,  0
-    .set MB2_HEADER_LEN, multiboot_header_end - multiboot_header_start
+    .set MB_MAGIC,      0x1BADB002
+    .set MB_FLAGS,      0x00000003
+    .set MB_CHECKSUM,   -(MB_MAGIC + MB_FLAGS)
 
 multiboot_header_start:
-    .long MB2_MAGIC
-    .long MB2_ARCH_I386
-    .long MB2_HEADER_LEN
-    .long -(MB2_MAGIC + MB2_ARCH_I386 + MB2_HEADER_LEN)
-
-    /* End tag: type=0, size=8 */
-    .short 0
-    .short 0
-    .long  8
+    .long MB_MAGIC
+    .long MB_FLAGS
+    .long MB_CHECKSUM
 
 multiboot_header_end:
 
@@ -88,14 +82,22 @@ _start:
     mov %eax, boot_pdpt
     
     /* Map first 16MB with 2MB huge pages (8 entries) */
-    mov $boot_pd, %edi
-    mov $0x83, %eax         /* Present, writable, huge page */
-    mov $8, %ecx            /* 8 entries = 16MB */
-.map_page:
-    mov %eax, (%edi)
-    add $0x200000, %eax     /* Next 2MB */
-    add $8, %edi            /* Next PD entry */
-    loop .map_page
+    mov $0x83, %eax         /* Present, writable, huge page at 0x0 */
+    mov %eax, boot_pd
+    mov $0x200083, %eax     /* 2MB */
+    mov %eax, boot_pd + 8
+    mov $0x400083, %eax     /* 4MB */
+    mov %eax, boot_pd + 16
+    mov $0x600083, %eax     /* 6MB */
+    mov %eax, boot_pd + 24
+    mov $0x800083, %eax     /* 8MB */
+    mov %eax, boot_pd + 32
+    mov $0xA00083, %eax     /* 10MB */
+    mov %eax, boot_pd + 40
+    mov $0xC00083, %eax     /* 12MB */
+    mov %eax, boot_pd + 48
+    mov $0xE00083, %eax     /* 14MB */
+    mov %eax, boot_pd + 56
     
     /* Write 'D' to show page tables set up */
     mov $0xB8000, %edi
