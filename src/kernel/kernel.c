@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "arch/gdt.h"
 #include "arch/idt.h"
 #include "arch/irq.h"
 #include "arch/timer.h"
@@ -7,6 +8,7 @@
 #include "mem/pmm.h"
 #include "mem/vmm.h"
 #include "mem/kheap.h"
+#include "proc/sched.h"
 
 /* COM1 serial debug output - survives triple faults, readable in QEMU -serial stdio */
 static void serial_init(void)
@@ -51,6 +53,48 @@ static void print_hex64(volatile uint16_t *video, int offset, uint64_t value) {
     }
 }
 
+/* Demo tasks — run concurrently to prove the scheduler works. */
+static void task_a(void)
+{
+    volatile uint16_t *row = (uint16_t *)0xB8000 + VGA_COLS * 5;
+    const char *label = "Task A: ";
+    for (int i = 0; label[i]; i++)
+        row[i] = (0x0B << 8) | label[i]; /* cyan */
+    uint32_t n = 0;
+    for (;;) {
+        /* Print n as 8 hex digits */
+        for (int i = 7; i >= 0; i--) {
+            uint8_t nibble = (n >> (i * 4)) & 0xF;
+            char c = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            row[8 + (7 - i)] = (0x0B << 8) | c;
+        }
+        n++;
+        for (volatile int d = 0; d < 100000; d++); /* busy delay */
+    }
+}
+
+static void task_b(void)
+{
+    volatile uint16_t *row = (uint16_t *)0xB8000 + VGA_COLS * 6;
+    const char *label = "Task B: ";
+    for (int i = 0; label[i]; i++)
+        row[i] = (0x0D << 8) | label[i]; /* magenta */
+    uint32_t n = 0;
+    for (;;) {
+        for (int i = 7; i >= 0; i--) {
+            uint8_t nibble = (n >> (i * 4)) & 0xF;
+            char c = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            row[8 + (7 - i)] = (0x0D << 8) | c;
+        }
+        n++;
+        for (volatile int d = 0; d < 150000; d++);
+    }
+}
+
+/* Demo tasks — run concurrently to prove the scheduler works. */
+static void task_a(void);
+static void task_b(void);
+
 __attribute__((noreturn))
 void kernel_main(struct multiboot_info *mb_info)
 {
@@ -83,6 +127,9 @@ void kernel_main(struct multiboot_info *mb_info)
 
     serial_init();
     serial_puts("[serial] kernel_main entered\r\n");
+
+    gdt_init();
+    serial_puts("[serial] gdt_init done\r\n");
 
     idt_init();
     serial_puts("[serial] idt_init done\r\n");
@@ -145,28 +192,18 @@ void kernel_main(struct multiboot_info *mb_info)
     void *heap_test = kmalloc(64);
     mrow[4] = heap_test ? ((0x0A << 8) | 'K') : ((0x0C << 8) | 'X'); // green K = kmalloc ok, red X = fail
     serial_puts(heap_test ? "[serial] kmalloc ok\r\n" : "[serial] kmalloc FAILED\r\n");
-    serial_puts("[serial] entering timer loop\r\n");
 
-    // Display timer ticks to show interrupts are working
-    video[VGA_COLS*2] = (0x0F << 8) | 'T';
-    video[VGA_COLS*2+1] = (0x0F << 8) | 'i';
-    video[VGA_COLS*2+2] = (0x0F << 8) | 'm';
-    video[VGA_COLS*2+3] = (0x0F << 8) | 'e';
-    video[VGA_COLS*2+4] = (0x0F << 8) | 'r';
-    video[VGA_COLS*2+5] = (0x0F << 8) | ':';
-    video[VGA_COLS*2+6] = (0x0F << 8) | ' ';
+    sched_init();
+    serial_puts("[serial] sched_init done\r\n");
 
+    /* Demo task A: counts up on VGA row 5 */
+    task_create("task_a", task_a);
+    /* Demo task B: counts up on VGA row 6 */
+    task_create("task_b", task_b);
+
+    serial_puts("[serial] tasks created, entering idle loop\r\n");
+
+    /* Idle loop — the scheduler will preempt this and run the other tasks. */
     for (;;)
-    {
-        uint32_t ticks = timer_ticks();
-        
-        // Display tick count in hex (8 digits)
-        for (int i = 7; i >= 0; i--) {
-            uint8_t nibble = (ticks >> (i * 4)) & 0xF;
-            char c = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-            video[VGA_COLS*2 + 7 + (7-i)] = (0x0A << 8) | c;
-        }
-        
         __asm__ volatile("hlt");
-    }
 }

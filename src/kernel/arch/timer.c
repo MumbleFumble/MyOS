@@ -1,12 +1,14 @@
 ﻿#include <stdint.h>
 #include "irq.h"
 #include "pit.h"
+#include "../proc/sched.h"
 
 static volatile uint32_t ticks = 0;
 
 static void timer_handler(void)
 {
     ++ticks;
+    sched_tick();
 }
 
 void timer_init(void)

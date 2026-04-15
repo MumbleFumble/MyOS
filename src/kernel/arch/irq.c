@@ -38,8 +38,10 @@ void irq_install_handler(int irq, void (*handler)(void))
 void irq_dispatch(int irq)
 {
     if (irq < 0 || irq >= 16) return;
-    irq_handlers[irq]();
+    /* Send EOI before the handler so the PIC in-service bit is cleared
+     * even if the handler never returns (e.g. context_switch preempts). */
     pic_send_eoi((uint8_t)irq);
+    irq_handlers[irq]();
 }
 
 static void default_irq_handler(void)
