@@ -2,8 +2,8 @@
 #include "pmm.h"
 #include "vmm.h"
 
-#define HEAP_START   0x01000000UL  /* 16 MiB, within identity-mapped range */
-#define HEAP_INITIAL_SIZE (4 * 1024 * 1024UL) /* 4 MiB */
+#define HEAP_START   0x00400000UL  /* 4 MiB - safely within 16 MiB identity map */
+#define HEAP_INITIAL_SIZE (8 * 1024 * 1024UL) /* 8 MiB - limit at 12 MiB, still inside identity map */
 
 static uint64_t heap_start = HEAP_START;
 static uint64_t heap_end   = HEAP_START;
@@ -17,12 +17,9 @@ static uint64_t align_up(uint64_t val, uint64_t align)
 static void heap_grow_to(uint64_t new_end)
 {
     new_end = align_up(new_end, PAGE_SIZE);
+    /* Pages below 16 MiB are already identity-mapped by boot.S - no VMM call needed */
     while (heap_end < new_end && heap_end < heap_limit)
-    {
-        uint64_t phys = pmm_alloc_page();
-        vmm_map_page(phys, heap_end, PAGE_RW);
         heap_end += PAGE_SIZE;
-    }
 }
 
 void kheap_init(struct memory_map *memmap)

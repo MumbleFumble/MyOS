@@ -11,7 +11,7 @@ BOOT_DIR   := $(ISO_DIR)/boot
 KERNEL_ELF := build/$(TARGET).elf
 ISO_IMAGE  := build/$(TARGET).iso
 
-CFLAGS     := -ffreestanding -O2 -Wall -Wextra -m64 -std=gnu11 -fno-pic -fno-pie -fno-asynchronous-unwind-tables -mcmodel=kernel -mno-red-zone
+CFLAGS     := -ffreestanding -O2 -Wall -Wextra -m64 -std=gnu11 -fno-pic -fno-pie -fno-asynchronous-unwind-tables -mcmodel=kernel -mno-red-zone -mgeneral-regs-only
 LDFLAGS    := -nostdlib -z max-page-size=0x1000 -m elf_x86_64
 
 SRC_DIR    := src
@@ -43,7 +43,7 @@ iso: $(KERNEL_ELF)
 	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(ISO_IMAGE) $(ISO_DIR) 2>&1 | grep -v "xorriso"
 
 run: iso
-	qemu-system-$(ARCH) -cdrom $(ISO_IMAGE) -boot d -m 512M
+	qemu-system-$(ARCH) -cdrom $(ISO_IMAGE) -boot d -m 512M -serial stdio -no-reboot -no-shutdown
 
 run-hd: iso
 	qemu-system-$(ARCH) -hda $(ISO_IMAGE) -m 512M

@@ -2,10 +2,34 @@
 #include "arch/idt.h"
 #include "arch/irq.h"
 #include "arch/timer.h"
+#include "arch/port_io.h"
 #include "mem/multiboot.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
 #include "mem/kheap.h"
+
+/* COM1 serial debug output - survives triple faults, readable in QEMU -serial stdio */
+static void serial_init(void)
+{
+    outb(0x3F8 + 1, 0x00); /* disable interrupts */
+    outb(0x3F8 + 3, 0x80); /* enable DLAB */
+    outb(0x3F8 + 0, 0x03); /* 38400 baud low */
+    outb(0x3F8 + 1, 0x00); /* 38400 baud high */
+    outb(0x3F8 + 3, 0x03); /* 8N1 */
+    outb(0x3F8 + 2, 0xC7); /* FIFO on */
+    outb(0x3F8 + 4, 0x0B); /* RTS/DSR */
+}
+
+static void serial_putchar(char c)
+{
+    while (!(inb(0x3F8 + 5) & 0x20));
+    outb(0x3F8, (uint8_t)c);
+}
+
+static void serial_puts(const char *s)
+{
+    while (*s) serial_putchar(*s++);
+}
 
 #define VGA_MEMORY 0xB8000
 #define VGA_COLS   80
@@ -57,9 +81,15 @@ void kernel_main(struct multiboot_info *mb_info)
         }
     }
 
+    serial_init();
+    serial_puts("[serial] kernel_main entered\r\n");
+
     idt_init();
+    serial_puts("[serial] idt_init done\r\n");
     irq_init();
+    serial_puts("[serial] irq_init done\r\n");
     timer_init();
+    serial_puts("[serial] timer_init done\r\n");
 
     // Test extended identity mapping first
     video[VGA_COLS+13] = (0x0A << 8) | 'I';
@@ -95,10 +125,27 @@ void kernel_main(struct multiboot_info *mb_info)
     char digit = '0' + (memmap.region_count % 10);
     video[VGA_COLS+26] = (0x0A << 8) | digit;
     
-    // Memory management disabled for now - causes crash
-    // pmm_init(&memmap);
-    // vmm_init();
-    // kheap_init(&memmap);
+    // Memory management init - with per-step progress on row 4
+    volatile uint16_t *mrow = video + VGA_COLS * 4;
+    mrow[0] = (0x0E << 8) | 'M'; // yellow M = starting mem init
+    serial_puts("[serial] pmm_init start\r\n");
+
+    pmm_init(&memmap);
+    mrow[1] = (0x0A << 8) | 'P'; // green P = pmm ok
+    serial_puts("[serial] pmm_init done\r\n");
+
+    vmm_init();
+    mrow[2] = (0x0A << 8) | 'V'; // green V = vmm ok
+    serial_puts("[serial] vmm_init done\r\n");
+
+    kheap_init(&memmap);
+    mrow[3] = (0x0A << 8) | 'H'; // green H = heap ok
+    serial_puts("[serial] kheap_init done\r\n");
+
+    void *heap_test = kmalloc(64);
+    mrow[4] = heap_test ? ((0x0A << 8) | 'K') : ((0x0C << 8) | 'X'); // green K = kmalloc ok, red X = fail
+    serial_puts(heap_test ? "[serial] kmalloc ok\r\n" : "[serial] kmalloc FAILED\r\n");
+    serial_puts("[serial] entering timer loop\r\n");
 
     // Display timer ticks to show interrupts are working
     video[VGA_COLS*2] = (0x0F << 8) | 'T';

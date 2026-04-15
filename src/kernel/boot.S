@@ -158,6 +158,16 @@ long_mode_start:
     mov %ax, %fs
     mov %ax, %gs
     mov %ax, %ss
+
+    /* Enable SSE: clear CR0.EM (bit 2), set CR0.MP (bit 1) */
+    mov %cr0, %rax
+    and $~0x4, %rax
+    or  $0x2,  %rax
+    mov %rax, %cr0
+    /* Set CR4.OSFXSR (bit 9) + CR4.OSXMMEXCPT (bit 10) */
+    mov %cr4, %rax
+    or  $0x600, %rax
+    mov %rax, %cr4
     
     /* Set up stack */
     mov $kernel_stack_top, %rsp
