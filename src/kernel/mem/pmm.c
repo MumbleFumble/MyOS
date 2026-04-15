@@ -59,8 +59,17 @@ void pmm_init(struct memory_map *memmap)
         }
     }
 
-    /* Reserve first few frames (including zero page) */
-    for (uint32_t f = 0; f < 16 && f < total_frames; ++f)
+    /*
+     * Reserve the first 16MB entirely.
+     * This covers the kernel binary, VGA, BIOS ROM, the kernel heap
+     * (4–12MB), boot page tables, and the initial stack — all of which
+     * live in the identity-mapped region set up by boot.S.
+     * PMM will hand out frames starting at 16MB (physical 0x1000000).
+     */
+    uint32_t reserve_end = (16u * 1024u * 1024u) / PAGE_SIZE; /* 4096 frames */
+    if (reserve_end > total_frames)
+        reserve_end = total_frames;
+    for (uint32_t f = 0; f < reserve_end; ++f)
         bitmap_set(f);
 }
 

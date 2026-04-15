@@ -81,23 +81,20 @@ _start:
     or $0x3, %eax
     mov %eax, boot_pdpt
     
-    /* Map first 16MB with 2MB huge pages (8 entries) */
-    mov $0x83, %eax         /* Present, writable, huge page at 0x0 */
-    mov %eax, boot_pd
-    mov $0x200083, %eax     /* 2MB */
-    mov %eax, boot_pd + 8
-    mov $0x400083, %eax     /* 4MB */
-    mov %eax, boot_pd + 16
-    mov $0x600083, %eax     /* 6MB */
-    mov %eax, boot_pd + 24
-    mov $0x800083, %eax     /* 8MB */
-    mov %eax, boot_pd + 32
-    mov $0xA00083, %eax     /* 10MB */
-    mov %eax, boot_pd + 40
-    mov $0xC00083, %eax     /* 12MB */
-    mov %eax, boot_pd + 48
-    mov $0xE00083, %eax     /* 14MB */
-    mov %eax, boot_pd + 56
+    /* Map first 512MB with 2MB huge pages (256 entries).
+     * This covers kernel (1MB), heap (4-12MB), and all frames
+     * the PMM will hand out (16MB+) up to the QEMU memory limit.
+     * Each PD entry: phys = index * 2MB, flags = Present|RW|HugePage (0x83).
+     */
+    xor %ecx, %ecx          /* ecx = PD index (0..255) */
+    mov $0x83, %eax         /* flags for entry 0: phys=0, P|RW|PS */
+.fill_pd:
+    mov %eax, boot_pd(,%ecx,8)  /* pd[ecx].low  = phys + flags */
+                                 /* pd[ecx].high = 0  (already zeroed) */
+    add $0x200000, %eax         /* advance physical address by 2MB */
+    inc %ecx
+    cmp $256, %ecx
+    jl .fill_pd
     
     /* Write 'D' to show page tables set up */
     mov $0xB8000, %edi

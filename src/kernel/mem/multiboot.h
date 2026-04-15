@@ -15,28 +15,22 @@ struct memory_map {
     uint32_t region_count;
 };
 
-struct multiboot_tag {
-    uint32_t type;
-    uint32_t size;
-};
-
-struct multiboot_tag_mmap {
-    uint32_t type;
-    uint32_t size;
-    uint32_t entry_size;
-    uint32_t entry_version;
-};
-
-struct multiboot_mmap_entry {
-    uint64_t addr;
-    uint64_t len;
-    uint32_t type;
-    uint32_t zero;
-};
-
+/*
+ * Multiboot1 info structure.
+ * GRUB places this in memory and passes its physical address in EBX.
+ * All pointer fields are 32-bit physical addresses (identity-mapped).
+ */
 struct multiboot_info {
-    uint32_t total_size;
-    uint32_t reserved;
-};
+    uint32_t flags;
+    uint32_t mem_lower;      /* KB below 1MB   */
+    uint32_t mem_upper;      /* KB above 1MB   */
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t syms[4];
+    uint32_t mmap_length;    /* byte length of mmap buffer */
+    uint32_t mmap_addr;      /* physical address of first mmap entry */
+} __attribute__((packed));
 
 void multiboot_parse(struct multiboot_info *mb_info, struct memory_map *out);

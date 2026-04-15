@@ -40,3 +40,6 @@ context_switch:
 
     /* ret pops the saved RIP of the new task */
     ret
+
+/* Mark stack as non-executable */
+.section .note.GNU-stack, "", @progbits

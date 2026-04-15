@@ -38,6 +38,7 @@ struct task {
     task_state_t  state;
     uint32_t      pid;
     const char   *name;
+    uint64_t      cr3;          /* physical address of PML4 (0 = use current) */
 };
 
 /*
@@ -57,6 +58,9 @@ uint32_t task_create(const char *name, void (*func)(void));
  * Picks the next READY task and switches to it.
  */
 void sched_tick(void);
+
+/* Called by sys_exit: mark current task dead and switch away immediately. */
+void sched_current_exit(void);
 
 /* Low-level context switch (context_switch.S). */
 void context_switch(uint64_t *old_rsp, uint64_t new_rsp);

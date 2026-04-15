@@ -1,5 +1,6 @@
 #include "sched.h"
 #include "../mem/kheap.h"
+#include "../mem/vmm.h"
 #include "../arch/gdt.h"
 
 /* -----------------------------------------------------------------------
@@ -28,6 +29,7 @@ void sched_init(void)
     tasks[0].state = TASK_RUNNING;
     tasks[0].pid   = next_pid++;
     tasks[0].name  = "idle";
+    tasks[0].cr3   = vmm_current_cr3();
     task_count     = 1;
     current        = 0;
 }
@@ -51,6 +53,7 @@ uint32_t task_create(const char *name, void (*func)(void))
     t->pid   = next_pid++;
     t->name  = name;
     t->entry = func;
+    t->cr3   = vmm_current_cr3();   /* kernel tasks share the boot address space */
 
     /* Set up initial stack frame. */
     uint8_t *stack_top = t->stack + TASK_STACK_SIZE;
@@ -71,6 +74,18 @@ uint32_t task_create(const char *name, void (*func)(void))
     return t->pid;
 }
 
+void sched_current_exit(void)
+{
+    tasks[current].state = TASK_DEAD;
+    /* Re-enable interrupts then force a schedule.
+     * We're called from a syscall (trap gate) so IF may be on already,
+     * but be explicit to be safe. */
+    __asm__ volatile("sti");
+    sched_tick();
+    /* sched_tick context-switched away; this is unreachable. */
+    for (;;) __asm__ volatile("hlt");
+}
+
 void sched_tick(void)
 {
     if (task_count <= 1)
@@ -89,7 +104,13 @@ void sched_tick(void)
     if (next == old)
         return; /* nothing else to run */
 
-    tasks[old].state   = TASK_READY;
+    /* Only mark old task READY if it hasn't already exited.
+     * sched_current_exit() marks the task DEAD before calling sched_tick();
+     * without this guard sched_tick would immediately revive it as a zombie,
+     * causing repeated preemptions inside sched_current_exit's hlt loop and
+     * an eventual kernel-stack overflow. */
+    if (tasks[old].state != TASK_DEAD)
+        tasks[old].state = TASK_READY;
     tasks[next].state  = TASK_RUNNING;
     current = next;
 
@@ -97,6 +118,10 @@ void sched_tick(void)
      * so that interrupts/syscalls from ring 3 land in the right place. */
     if (tasks[next].stack)
         tss_set_rsp0((uint64_t)(tasks[next].stack + TASK_STACK_SIZE));
+
+    /* Switch address space if necessary (no-op for tasks sharing the same PML4). */
+    if (tasks[next].cr3 != tasks[old].cr3)
+        vmm_switch(tasks[next].cr3);
 
     context_switch(&tasks[old].rsp, tasks[next].rsp);
 }
