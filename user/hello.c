@@ -95,7 +95,8 @@ static void cmd_memtest(void)
 
 void _start(void)
 {
-    puts_u("\r\nMyOS shell v0.2 -- commands: memtest, clear, exit\r\n> ");
+    sys_clear();
+    puts_u("MyOS shell v0.2 -- commands: memtest, clear, exit\r\n> ");
 
     for (;;) {
         char line[256];
@@ -105,6 +106,7 @@ void _start(void)
         if (n == 0) { puts_u("> "); continue; }
 
         if (streq(line, "exit"))    { puts_u("bye!\r\n"); sys_exit(0); }
+        if (streq(line, "clear"))   { sys_clear(); puts_u("> "); continue; }
         if (streq(line, "memtest")) { cmd_memtest(); puts_u("> "); continue; }
         if (streq(line, "help")) {
             puts_u("commands: memtest, clear, exit\r\n> ");

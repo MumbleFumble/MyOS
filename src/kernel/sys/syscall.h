@@ -7,6 +7,7 @@
 #define SYS_EXIT    2   /* exit(status)           -> does not return */
 #define SYS_READ    3   /* read(fd, buf, count)   -> bytes read     */
 #define SYS_SBRK    4   /* sbrk(increment)        -> old break addr */
+#define SYS_CLEAR   5   /* clear()                -> 0              */
 
 /* fd values */
 #define FD_STDIN    0

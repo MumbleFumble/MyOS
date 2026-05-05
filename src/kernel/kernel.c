@@ -62,43 +62,6 @@ static void print_hex64(volatile uint16_t *video, int offset, uint64_t value) {
 }
 
 /* Demo tasks — run concurrently to prove the scheduler works. */
-static void task_a(void)
-{
-    volatile uint16_t *row = (uint16_t *)0xB8000 + VGA_COLS * 5;
-    const char *label = "Task A: ";
-    for (int i = 0; label[i]; i++)
-        row[i] = (0x0B << 8) | label[i]; /* cyan */
-    uint32_t n = 0;
-    for (;;) {
-        /* Print n as 8 hex digits */
-        for (int i = 7; i >= 0; i--) {
-            uint8_t nibble = (n >> (i * 4)) & 0xF;
-            char c = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-            row[8 + (7 - i)] = (0x0B << 8) | c;
-        }
-        n++;
-        for (volatile int d = 0; d < 100000; d++); /* busy delay */
-    }
-}
-
-static void task_b(void)
-{
-    volatile uint16_t *row = (uint16_t *)0xB8000 + VGA_COLS * 6;
-    const char *label = "Task B: ";
-    for (int i = 0; label[i]; i++)
-        row[i] = (0x0D << 8) | label[i]; /* magenta */
-    uint32_t n = 0;
-    for (;;) {
-        for (int i = 7; i >= 0; i--) {
-            uint8_t nibble = (n >> (i * 4)) & 0xF;
-            char c = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-            row[8 + (7 - i)] = (0x0D << 8) | c;
-        }
-        n++;
-        for (volatile int d = 0; d < 150000; d++);
-    }
-}
-
 /* Task C: exercises the syscall interface — writes to serial then exits. */
 static void task_c(void)
 {
@@ -142,9 +105,6 @@ static void task_c(void)
     for (;;) __asm__ volatile("hlt");
 }
 
-/* Demo tasks — run concurrently to prove the scheduler works. */
-static void task_a(void);
-static void task_b(void);
 static void task_c(void);
 
 __attribute__((noreturn))
@@ -289,10 +249,6 @@ void kernel_main(struct multiboot_info *mb_info)
     syscall_init();
     serial_puts("[serial] syscall_init done\r\n");
 
-    /* Demo task A: counts up on VGA row 5 */
-    task_create("task_a", task_a);
-    /* Demo task B: counts up on VGA row 6 */
-    task_create("task_b", task_b);
     /* Demo task C: exercises syscalls */
     task_create("task_c", task_c);
 

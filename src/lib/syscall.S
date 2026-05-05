@@ -37,4 +37,11 @@ sys_sbrk:
     int  0x80
     ret
 
+/* void sys_clear(void) */
+.global sys_clear
+sys_clear:
+    mov  rax, 5         /* SYS_CLEAR */
+    int  0x80
+    ret
+
 .section .note.GNU-stack,"",@progbits

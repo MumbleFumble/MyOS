@@ -122,6 +122,13 @@ static int64_t sys_sbrk(uint64_t increment)
     return (int64_t)old_break;
 }
 
+/* SYS_CLEAR: clear() — wipe the VGA screen and reset the cursor */
+static int64_t sys_clear(void)
+{
+    vga_clear();
+    return 0;
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -133,6 +140,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_READ:  return sys_read(arg1, arg2, arg3);
     case SYS_EXIT:  return sys_exit(arg1);
     case SYS_SBRK:  return sys_sbrk(arg1);
+    case SYS_CLEAR: return sys_clear();
     default:        return -1;  /* ENOSYS */
     }
 }
