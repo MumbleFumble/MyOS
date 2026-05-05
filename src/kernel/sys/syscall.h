@@ -5,8 +5,11 @@
 /* Syscall numbers */
 #define SYS_WRITE   1   /* write(fd, buf, count)  -> bytes written */
 #define SYS_EXIT    2   /* exit(status)           -> does not return */
+#define SYS_READ    3   /* read(fd, buf, count)   -> bytes read     */
+#define SYS_SBRK    4   /* sbrk(increment)        -> old break addr */
 
 /* fd values */
+#define FD_STDIN    0
 #define FD_STDOUT   1
 #define FD_STDERR   2
 

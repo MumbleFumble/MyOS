@@ -9,7 +9,14 @@
 #include "mem/vmm.h"
 #include "mem/kheap.h"
 #include "proc/sched.h"
+#include "proc/elf.h"
 #include "sys/syscall.h"
+#include "drivers/vga.h"
+#include "drivers/keyboard.h"
+
+/* Embedded user binary — provided by linker (--format=binary hello.elf) */
+extern uint8_t _binary_build_user_hello_elf_start[];
+extern uint8_t _binary_build_user_hello_elf_end[];
 
 /* COM1 serial debug output - survives triple faults, readable in QEMU -serial stdio */
 static void serial_init(void)
@@ -180,6 +187,12 @@ void kernel_main(struct multiboot_info *mb_info)
     serial_puts("[serial] idt_init done\r\n");
     irq_init();
     serial_puts("[serial] irq_init done\r\n");
+
+    vga_init();
+    serial_puts("[serial] vga_init done\r\n");
+    keyboard_init();
+    serial_puts("[serial] keyboard_init done\r\n");
+
     timer_init();
     serial_puts("[serial] timer_init done\r\n");
 
@@ -282,6 +295,20 @@ void kernel_main(struct multiboot_info *mb_info)
     task_create("task_b", task_b);
     /* Demo task C: exercises syscalls */
     task_create("task_c", task_c);
+
+    /* Load the embedded user-space ELF and launch it as a ring-3 task */
+    {
+        uint64_t hello_size = (uint64_t)(_binary_build_user_hello_elf_end - _binary_build_user_hello_elf_start);
+        serial_puts("[serial] loading user/hello.elf...\r\n");
+        elf_result_t er;
+        int r = elf_load(_binary_build_user_hello_elf_start, hello_size, &er);
+        if (r == 0) {
+            serial_puts("[serial] elf_load OK, creating ring-3 task\r\n");
+            user_task_create("hello", er.cr3, er.entry, er.ustack);
+        } else {
+            serial_puts("[serial] elf_load FAILED\r\n");
+        }
+    }
 
     serial_puts("[serial] tasks created, entering idle loop\r\n");
 

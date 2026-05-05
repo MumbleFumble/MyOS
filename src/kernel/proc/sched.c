@@ -77,13 +77,14 @@ uint32_t task_create(const char *name, void (*func)(void))
 void sched_current_exit(void)
 {
     tasks[current].state = TASK_DEAD;
-    /* Re-enable interrupts then force a schedule.
-     * We're called from a syscall (trap gate) so IF may be on already,
-     * but be explicit to be safe. */
     __asm__ volatile("sti");
     sched_tick();
-    /* sched_tick context-switched away; this is unreachable. */
     for (;;) __asm__ volatile("hlt");
+}
+
+struct task *sched_current_task(void)
+{
+    return &tasks[current];
 }
 
 void sched_tick(void)
@@ -143,4 +144,101 @@ static void task_entry_trampoline(void)
     /* If the task function returns, mark it dead. */
     tasks[current].state = TASK_DEAD;
     for (;;) __asm__ volatile("hlt");
+}
+
+/* -----------------------------------------------------------------------
+ * Ring-3 task creation
+ * ----------------------------------------------------------------------- */
+
+/*
+ * Trampoline for ring-3 tasks.
+ * Called via the normal context_switch ret path.
+ * The iretq frame is already on the kernel stack (set up by user_task_create).
+ * We just need to reload the user segment registers and execute iretq.
+ */
+static void user_entry_trampoline(void)
+{
+    /* Reload user data segments so DS/ES/FS/GS point to ring-3 data. */
+    __asm__ volatile(
+        "mov %0, %%ax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        :: "i"(0x23)   /* GDT_USER_DATA | RPL3 */
+        : "ax"
+    );
+    /* iretq pops: RIP, CS, RFLAGS, RSP, SS — all set up by user_task_create */
+    __asm__ volatile("iretq");
+    __builtin_unreachable();
+}
+
+uint32_t user_task_create(const char *name, uint64_t cr3,
+                          uint64_t entry, uint64_t ustack)
+{
+    if (task_count >= MAX_TASKS) return 0;
+
+    struct task *t = &tasks[task_count];
+
+    t->stack = (uint8_t *)kmalloc(TASK_STACK_SIZE);
+    if (!t->stack) return 0;
+
+    for (uint32_t i = 0; i < TASK_STACK_SIZE; i++)
+        t->stack[i] = 0;
+
+    t->state = TASK_READY;
+    t->pid   = next_pid++;
+    t->name  = name;
+    t->entry = (void (*)(void))0;   /* not used for ring-3 tasks */
+    t->cr3   = cr3;
+
+    /*
+     * Build the kernel stack so that context_switch's ret lands in
+     * user_entry_trampoline, which then executes iretq with this frame:
+     *
+     *  High address (stack top)
+     *  ┌─────────────────┐
+     *  │ SS  (0x23)      │  ← user data selector
+     *  │ RSP (ustack)    │  ← user stack pointer
+     *  │ RFLAGS          │  ← IF=1, IOPL=0
+     *  │ CS  (0x1B)      │  ← user code selector
+     *  │ RIP (entry)     │  ← user ELF entry point
+     *  ├─────────────────┤  ← iretq reads from here upward
+     *  │ r15=0           │
+     *  │ r14=0           │
+     *  │ r13=0           │
+     *  │ r12=0           │
+     *  │ rbx=0           │
+     *  │ rbp=0           │
+     *  │ RIP=trampoline  │  ← context_switch ret pops this
+     *  └─────────────────┘  ← t->rsp points here
+     *  Low address
+     */
+    uint64_t *sp = (uint64_t *)(t->stack + TASK_STACK_SIZE);
+
+    /* iretq frame (pushed in reverse — high address first) */
+    *--sp = 0x23;               /* SS  */
+    *--sp = ustack;             /* RSP */
+    *--sp = 0x202;              /* RFLAGS: IF=1, reserved bit 1 set */
+    *--sp = 0x1B;               /* CS  */
+    *--sp = entry;              /* RIP */
+
+    /* context_switch frame */
+    *--sp = (uint64_t)user_entry_trampoline;  /* ret address */
+    *--sp = 0;  /* r15 */
+    *--sp = 0;  /* r14 */
+    *--sp = 0;  /* r13 */
+    *--sp = 0;  /* r12 */
+    *--sp = 0;  /* rbx */
+    *--sp = 0;  /* rbp  ← rsp points here */
+
+    t->rsp = (uint64_t)sp;
+
+    /* Heap starts just above 2TB mark — safely in PML4[4], away from
+     * the code (PML4[2] at 1TB) and the boot identity map (PML4[0]). */
+    t->heap_base = 0x20000000000UL;  /* 2TB */
+    t->heap_end  = 0x20000000000UL;  /* nothing allocated yet */
+
+    task_count++;
+    return t->pid;
 }

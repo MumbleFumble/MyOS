@@ -39,6 +39,9 @@ struct task {
     uint32_t      pid;
     const char   *name;
     uint64_t      cr3;          /* physical address of PML4 (0 = use current) */
+    /* User-space heap (managed by SYS_SBRK) */
+    uint64_t      heap_base;    /* lowest heap virtual address */
+    uint64_t      heap_end;     /* current break (next free byte) */
 };
 
 /*
@@ -61,6 +64,16 @@ void sched_tick(void);
 
 /* Called by sys_exit: mark current task dead and switch away immediately. */
 void sched_current_exit(void);
+
+/*
+ * Create a ring-3 task from a pre-loaded ELF result.
+ * Sets up a kernel stack with an iretq frame targeting the ELF entry point
+ * in the given address space.  The task will drop to ring 3 when first scheduled.
+ */
+uint32_t user_task_create(const char *name, uint64_t cr3, uint64_t entry, uint64_t ustack);
+
+/* Returns a pointer to the currently running task (never NULL after sched_init). */
+struct task *sched_current_task(void);
 
 /* Low-level context switch (context_switch.S). */
 void context_switch(uint64_t *old_rsp, uint64_t new_rsp);

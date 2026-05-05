@@ -14,9 +14,16 @@ ISO_IMAGE  := build/$(TARGET).iso
 CFLAGS     := -ffreestanding -O2 -Wall -Wextra -m64 -std=gnu11 -fno-pic -fno-pie -fno-asynchronous-unwind-tables -mcmodel=kernel -mno-red-zone -mgeneral-regs-only
 LDFLAGS    := -nostdlib -z max-page-size=0x1000 -m elf_x86_64
 
+# User-space build flags (ring-3, no kernel restrictions)
+USER_CFLAGS  := -ffreestanding -O2 -Wall -m64 -std=gnu11 -fno-pic -fno-pie \
+                -fno-asynchronous-unwind-tables -mno-red-zone -mcmodel=large -I.
+USER_LDFLAGS := -nostdlib -z max-page-size=0x1000 -m elf_x86_64
+
+USER_HELLO_ELF := build/user/hello.elf
+
 SRC_DIR    := src
 # First collect all C files
-KERNEL_SRC_ALL := $(wildcard $(SRC_DIR)/kernel/*.c $(SRC_DIR)/kernel/arch/*.c $(SRC_DIR)/kernel/mem/*.c $(SRC_DIR)/kernel/proc/*.c $(SRC_DIR)/kernel/sys/*.c)
+KERNEL_SRC_ALL := $(wildcard $(SRC_DIR)/kernel/*.c $(SRC_DIR)/kernel/arch/*.c $(SRC_DIR)/kernel/mem/*.c $(SRC_DIR)/kernel/proc/*.c $(SRC_DIR)/kernel/sys/*.c $(SRC_DIR)/kernel/drivers/*.c)
 # Then exclude isr80.c if it exists (we use isr80.S instead)
 KERNEL_SRC := $(filter-out %/isr80.c, $(KERNEL_SRC_ALL))
 KERNEL_ASM := $(SRC_DIR)/kernel/boot.S $(SRC_DIR)/kernel/arch/idt_load.S $(SRC_DIR)/kernel/arch/gdt_load.S $(SRC_DIR)/kernel/arch/irq_stubs.S $(SRC_DIR)/kernel/arch/isr80.S $(SRC_DIR)/kernel/proc/context_switch.S
@@ -26,9 +33,18 @@ KERNEL_OBJ := $(KERNEL_SRC:.c=.o) $(KERNEL_ASM:.S=.o)
 
 all: $(KERNEL_ELF)
 
-$(KERNEL_ELF): $(KERNEL_OBJ)
+# User programs
+$(USER_HELLO_ELF): user/hello.c src/lib/syscall.S src/lib/malloc.c user/user.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -T boot/linker.ld -o $@ $^
+	$(CC) $(USER_CFLAGS) -c user/hello.c       -o build/user/hello.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S  -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c   -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/hello.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(KERNEL_ELF): $(KERNEL_OBJ) $(USER_HELLO_ELF)
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -T boot/linker.ld -o $@ $(KERNEL_OBJ) \
+		--format=binary $(USER_HELLO_ELF) --format=default
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
