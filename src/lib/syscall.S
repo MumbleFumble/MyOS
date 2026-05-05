@@ -44,4 +44,25 @@ sys_clear:
     int  0x80
     ret
 
+/* long sys_getpid(void) */
+.global sys_getpid
+sys_getpid:
+    mov  rax, 6         /* SYS_GETPID */
+    int  0x80
+    ret
+
+/* long sys_wait(long pid) */
+.global sys_wait
+sys_wait:
+    mov  rax, 7         /* SYS_WAIT */
+    int  0x80
+    ret
+
+/* long sys_exec(const char *name) */
+.global sys_exec
+sys_exec:
+    mov  rax, 8         /* SYS_EXEC */
+    int  0x80
+    ret
+
 .section .note.GNU-stack,"",@progbits

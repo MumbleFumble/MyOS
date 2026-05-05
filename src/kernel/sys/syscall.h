@@ -8,6 +8,9 @@
 #define SYS_READ    3   /* read(fd, buf, count)   -> bytes read     */
 #define SYS_SBRK    4   /* sbrk(increment)        -> old break addr */
 #define SYS_CLEAR   5   /* clear()                -> 0              */
+#define SYS_GETPID  6   /* getpid()               -> current pid    */
+#define SYS_WAIT    7   /* wait(pid)              -> child exit code */
+#define SYS_EXEC    8   /* exec(name)             -> child pid      */
 
 /* fd values */
 #define FD_STDIN    0

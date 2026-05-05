@@ -96,7 +96,7 @@ static void cmd_memtest(void)
 void _start(void)
 {
     sys_clear();
-    puts_u("MyOS shell v0.2 -- commands: memtest, clear, exit\r\n> ");
+    puts_u("MyOS shell v0.3 -- commands: memtest, clear, getpid, exit\r\n> ");
 
     for (;;) {
         char line[256];
@@ -108,8 +108,14 @@ void _start(void)
         if (streq(line, "exit"))    { puts_u("bye!\r\n"); sys_exit(0); }
         if (streq(line, "clear"))   { sys_clear(); puts_u("> "); continue; }
         if (streq(line, "memtest")) { cmd_memtest(); puts_u("> "); continue; }
+        if (streq(line, "getpid"))  {
+            char buf[16];
+            long pid = sys_getpid();
+            puts_u("pid: "); puts_u(itoa(pid, buf)); puts_u("\r\n> ");
+            continue;
+        }
         if (streq(line, "help")) {
-            puts_u("commands: memtest, clear, exit\r\n> ");
+            puts_u("commands: memtest, clear, getpid, exit\r\n> ");
             continue;
         }
 

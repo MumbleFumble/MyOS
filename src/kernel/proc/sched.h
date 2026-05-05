@@ -12,6 +12,7 @@ typedef enum {
     TASK_READY   = 0,
     TASK_RUNNING = 1,
     TASK_DEAD    = 2,
+    TASK_WAITING = 3,   /* blocked in sched_wait_pid */
 } task_state_t;
 
 /*
@@ -42,6 +43,10 @@ struct task {
     /* User-space heap (managed by SYS_SBRK) */
     uint64_t      heap_base;    /* lowest heap virtual address */
     uint64_t      heap_end;     /* current break (next free byte) */
+    /* Process relationships */
+    uint32_t      parent_pid;   /* pid of task that spawned this one, 0 = none */
+    int32_t       exit_code;    /* exit status, valid when state == TASK_DEAD */
+    uint32_t      wait_pid;     /* pid we are waiting on (0 = any child), TASK_WAITING only */
 };
 
 /*
@@ -74,6 +79,16 @@ uint32_t user_task_create(const char *name, uint64_t cr3, uint64_t entry, uint64
 
 /* Returns a pointer to the currently running task (never NULL after sched_init). */
 struct task *sched_current_task(void);
+
+/* Find a task by pid. Returns NULL if not found. */
+struct task *sched_find_by_pid(uint32_t pid);
+
+/*
+ * Block the calling task until any direct child with the given pid exits.
+ * Pass pid=0 to wait for any child.
+ * Returns the child's exit code, or -1 if no matching child exists.
+ */
+int32_t sched_wait_pid(uint32_t pid);
 
 /* Low-level context switch (context_switch.S). */
 void context_switch(uint64_t *old_rsp, uint64_t new_rsp);

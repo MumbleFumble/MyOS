@@ -54,6 +54,9 @@ uint32_t task_create(const char *name, void (*func)(void))
     t->name  = name;
     t->entry = func;
     t->cr3   = vmm_current_cr3();   /* kernel tasks share the boot address space */
+    t->parent_pid = 0;
+    t->exit_code  = 0;
+    t->wait_pid   = 0;
 
     /* Set up initial stack frame. */
     uint8_t *stack_top = t->stack + TASK_STACK_SIZE;
@@ -76,7 +79,19 @@ uint32_t task_create(const char *name, void (*func)(void))
 
 void sched_current_exit(void)
 {
-    tasks[current].state = TASK_DEAD;
+    tasks[current].state     = TASK_DEAD;
+    tasks[current].exit_code = 0;  /* default; sys_exit sets it before calling us */
+
+    /* Wake any task waiting for this pid */
+    uint32_t dead_pid = tasks[current].pid;
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_WAITING &&
+            (tasks[i].wait_pid == 0 || tasks[i].wait_pid == dead_pid))
+        {
+            tasks[i].state = TASK_READY;
+        }
+    }
+
     __asm__ volatile("sti");
     sched_tick();
     for (;;) __asm__ volatile("hlt");
@@ -85,6 +100,42 @@ void sched_current_exit(void)
 struct task *sched_current_task(void)
 {
     return &tasks[current];
+}
+
+struct task *sched_find_by_pid(uint32_t pid)
+{
+    for (uint32_t i = 0; i < task_count; i++)
+        if (tasks[i].pid == pid) return &tasks[i];
+    return 0;
+}
+
+int32_t sched_wait_pid(uint32_t pid)
+{
+    /* Check if a matching dead child already exists */
+check:
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].state != TASK_DEAD) continue;
+        if (tasks[i].parent_pid != tasks[current].pid) continue;
+        if (pid != 0 && tasks[i].pid != pid) continue;
+        /* Found a dead child — collect its exit code */
+        return tasks[i].exit_code;
+    }
+    /* No dead child yet — block until one finishes */
+    /* First verify there is a matching live child */
+    int has_child = 0;
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].parent_pid != tasks[current].pid) continue;
+        if (pid != 0 && tasks[i].pid != pid) continue;
+        if (tasks[i].state != TASK_DEAD) { has_child = 1; break; }
+    }
+    if (!has_child) return -1;
+
+    tasks[current].state    = TASK_WAITING;
+    tasks[current].wait_pid = pid;
+    __asm__ volatile("sti");
+    sched_tick();
+    /* After being woken we are RUNNING again; re-check */
+    goto check;
 }
 
 void sched_tick(void)
@@ -97,7 +148,8 @@ void sched_tick(void)
     /* Round-robin: find the next READY task. */
     uint32_t next = (current + 1) % task_count;
     uint32_t tries = 0;
-    while (tasks[next].state == TASK_DEAD && tries < task_count) {
+    while ((tasks[next].state == TASK_DEAD || tasks[next].state == TASK_WAITING)
+           && tries < task_count) {
         next = (next + 1) % task_count;
         tries++;
     }
@@ -110,7 +162,7 @@ void sched_tick(void)
      * without this guard sched_tick would immediately revive it as a zombie,
      * causing repeated preemptions inside sched_current_exit's hlt loop and
      * an eventual kernel-stack overflow. */
-    if (tasks[old].state != TASK_DEAD)
+    if (tasks[old].state != TASK_DEAD && tasks[old].state != TASK_WAITING)
         tasks[old].state = TASK_READY;
     tasks[next].state  = TASK_RUNNING;
     current = next;
@@ -191,6 +243,9 @@ uint32_t user_task_create(const char *name, uint64_t cr3,
     t->name  = name;
     t->entry = (void (*)(void))0;   /* not used for ring-3 tasks */
     t->cr3   = cr3;
+    t->parent_pid = 0;
+    t->exit_code  = 0;
+    t->wait_pid   = 0;
 
     /*
      * Build the kernel stack so that context_switch's ret lands in

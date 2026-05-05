@@ -3,6 +3,8 @@
 #include "../arch/gdt.h"
 #include "../arch/port_io.h"
 #include "../proc/sched.h"
+#include "../proc/elf.h"
+#include "../proc/ramdisk.h"
 #include "../mem/vmm.h"
 #include "../mem/pmm.h"
 #include "../drivers/vga.h"
@@ -81,7 +83,7 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count)
 /* SYS_EXIT: exit(status) */
 static int64_t sys_exit(uint64_t status)
 {
-    (void)status;
+    sched_current_task()->exit_code = (int32_t)status;
     sched_current_exit();
     for (;;) __asm__ volatile("hlt");
     __builtin_unreachable();
@@ -129,6 +131,41 @@ static int64_t sys_clear(void)
     return 0;
 }
 
+/* SYS_GETPID: getpid() — return the calling task's pid */
+static int64_t sys_getpid(void)
+{
+    return (int64_t)sched_current_task()->pid;
+}
+
+/* SYS_WAIT: wait(pid) — block until child exits, return its exit code */
+static int64_t sys_wait(uint64_t pid)
+{
+    return (int64_t)sched_wait_pid((uint32_t)pid);
+}
+
+/* SYS_EXEC: exec(name) — load a named program from the ramdisk and run it.
+ * Returns the new task's pid, or -1 on error.
+ * The new task's parent_pid is set to the caller's pid. */
+static int64_t sys_exec(uint64_t name_va)
+{
+    const char *name = (const char *)name_va;
+    const ramdisk_entry_t *entry = ramdisk_find(name);
+    if (!entry) return -1;
+
+    elf_result_t er;
+    if (elf_load(entry->data, entry->size, &er) != 0) return -1;
+
+    uint32_t caller_pid = sched_current_task()->pid;
+    uint32_t child_pid  = user_task_create(entry->name, er.cr3, er.entry, er.ustack);
+    if (child_pid == 0) return -1;
+
+    /* Set parent relationship so SYS_WAIT can find this child */
+    struct task *child = sched_find_by_pid(child_pid);
+    if (child) child->parent_pid = caller_pid;
+
+    return (int64_t)child_pid;
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -136,12 +173,15 @@ static int64_t sys_clear(void)
 int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     switch (nr) {
-    case SYS_WRITE: return sys_write(arg1, arg2, arg3);
-    case SYS_READ:  return sys_read(arg1, arg2, arg3);
-    case SYS_EXIT:  return sys_exit(arg1);
-    case SYS_SBRK:  return sys_sbrk(arg1);
-    case SYS_CLEAR: return sys_clear();
-    default:        return -1;  /* ENOSYS */
+    case SYS_WRITE:  return sys_write(arg1, arg2, arg3);
+    case SYS_READ:   return sys_read(arg1, arg2, arg3);
+    case SYS_EXIT:   return sys_exit(arg1);
+    case SYS_SBRK:   return sys_sbrk(arg1);
+    case SYS_CLEAR:  return sys_clear();
+    case SYS_GETPID: return sys_getpid();
+    case SYS_WAIT:   return sys_wait(arg1);
+    case SYS_EXEC:   return sys_exec(arg1);
+    default:         return -1;  /* ENOSYS */
     }
 }
 

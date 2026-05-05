@@ -10,6 +10,7 @@
 #include "mem/kheap.h"
 #include "proc/sched.h"
 #include "proc/elf.h"
+#include "proc/ramdisk.h"
 #include "sys/syscall.h"
 #include "drivers/vga.h"
 #include "drivers/keyboard.h"
@@ -248,6 +249,13 @@ void kernel_main(struct multiboot_info *mb_info)
 
     syscall_init();
     serial_puts("[serial] syscall_init done\r\n");
+
+    /* Register embedded ELFs in the ramdisk so SYS_EXEC can find them */
+    {
+        uint64_t hello_size = (uint64_t)(_binary_build_user_hello_elf_end - _binary_build_user_hello_elf_start);
+        ramdisk_register("hello", _binary_build_user_hello_elf_start, hello_size);
+        serial_puts("[serial] ramdisk: registered hello\r\n");
+    }
 
     /* Demo task C: exercises syscalls */
     task_create("task_c", task_c);
