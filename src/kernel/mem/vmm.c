@@ -117,6 +117,27 @@ int vmm_alloc_pages(uint64_t cr3_phys, uint64_t virt, uint64_t n_pages, uint64_t
     return 0;
 }
 
+uint64_t vmm_virt_to_phys(uint64_t cr3_phys, uint64_t virt)
+{
+    uint64_t *pml4 = pa2va(cr3_phys & ~0xFFFUL);
+    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
+    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
+    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
+    uint64_t off      = virt & 0xFFFUL;
+
+    if (!(pml4[pml4_idx] & PAGE_PRESENT)) return 0;
+    uint64_t *pdpt = pa2va(pml4[pml4_idx] & ~0xFFFUL);
+    if (!(pdpt[pdpt_idx] & PAGE_PRESENT)) return 0;
+    uint64_t *pd = pa2va(pdpt[pdpt_idx] & ~0xFFFUL);
+    if (!(pd[pd_idx] & PAGE_PRESENT)) return 0;
+    if (pd[pd_idx] & 0x80) /* huge page */
+        return (pd[pd_idx] & ~0x1FFFFFUL) | (virt & 0x1FFFFFUL);
+    uint64_t *pt = pa2va(pd[pd_idx] & ~0xFFFUL);
+    if (!(pt[pt_idx] & PAGE_PRESENT)) return 0;
+    return (pt[pt_idx] & ~0xFFFUL) | off;
+}
+
 uint64_t vmm_create_address_space(void)
 {
     uint64_t new_pml4_phys = alloc_pt_frame();

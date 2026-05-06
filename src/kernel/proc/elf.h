@@ -53,9 +53,13 @@ typedef struct {
 /*
  * Load an ELF64 executable from a byte buffer embedded in the kernel.
  * Creates a new address space, maps all PT_LOAD segments, allocates a
- * user-mode stack at USER_STACK_TOP.
+ * user-mode stack at USER_STACK_TOP, and pushes an initial argc/argv frame.
+ *
+ * cmdline: space-separated argument string ("progname arg1 arg2").
+ *          May be NULL for no arguments (argc=0).
  *
  * Returns 0 on success, -1 on error.
  * On success, *out is filled.
  */
-int elf_load(const uint8_t *elf_data, uint64_t elf_size, elf_result_t *out);
+int elf_load(const uint8_t *elf_data, uint64_t elf_size,
+             const char *cmdline, elf_result_t *out);

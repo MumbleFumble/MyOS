@@ -11,9 +11,13 @@
 #include "proc/sched.h"
 #include "proc/elf.h"
 #include "proc/ramdisk.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
+#include "fs/diskfs.h"
 #include "sys/syscall.h"
 #include "drivers/vga.h"
 #include "drivers/keyboard.h"
+#include "drivers/rtc.h"
 
 /* Embedded user binary — provided by linker (--format=binary hello.elf) */
 extern uint8_t _binary_build_user_hello_elf_start[];
@@ -250,11 +254,31 @@ void kernel_main(struct multiboot_info *mb_info)
     syscall_init();
     serial_puts("[serial] syscall_init done\r\n");
 
-    /* Register embedded ELFs in the ramdisk so SYS_EXEC can find them */
+    /* Register embedded ELFs in the ramdisk AND ramfs so SYS_EXEC can find them */
     {
         uint64_t hello_size = (uint64_t)(_binary_build_user_hello_elf_end - _binary_build_user_hello_elf_start);
         ramdisk_register("hello", _binary_build_user_hello_elf_start, hello_size);
-        serial_puts("[serial] ramdisk: registered hello\r\n");
+        ramfs_add_hidden("hello", _binary_build_user_hello_elf_start, hello_size);
+        serial_puts("[serial] ramdisk/ramfs: registered hello\r\n");
+    }
+
+    /* Initialise the VFS and populate the ramfs with data files */
+    {
+        static const uint8_t motd[] =
+            "Welcome to MyOS v0.3\r\n"
+            "A hobby 64-bit OS built from scratch.\r\n"
+            "\r\n"
+            "Commands: help, ls, cat <file>, date, exec <prog>, getpid, memtest, clear, exit\r\n";
+        ramfs_add("motd", motd, sizeof(motd) - 1);
+        vfs_init();
+        serial_puts("[serial] vfs/ramfs init done\r\n");
+    }
+
+    /* Mount disk filesystem (optional — continues if no ATA disk found) */
+    {
+        int r = diskfs_mount();
+        if (r == 0) serial_puts("[serial] diskfs mounted\r\n");
+        else        serial_puts("[serial] diskfs: no disk found\r\n");
     }
 
     /* Demo task C: exercises syscalls */
@@ -265,7 +289,7 @@ void kernel_main(struct multiboot_info *mb_info)
         uint64_t hello_size = (uint64_t)(_binary_build_user_hello_elf_end - _binary_build_user_hello_elf_start);
         serial_puts("[serial] loading user/hello.elf...\r\n");
         elf_result_t er;
-        int r = elf_load(_binary_build_user_hello_elf_start, hello_size, &er);
+        int r = elf_load(_binary_build_user_hello_elf_start, hello_size, "hello", &er);
         if (r == 0) {
             serial_puts("[serial] elf_load OK, creating ring-3 task\r\n");
             user_task_create("hello", er.cr3, er.entry, er.ustack);

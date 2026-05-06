@@ -11,6 +11,10 @@
 #define SYS_GETPID  6   /* getpid()               -> current pid    */
 #define SYS_WAIT    7   /* wait(pid)              -> child exit code */
 #define SYS_EXEC    8   /* exec(name)             -> child pid      */
+#define SYS_OPEN    9   /* open(path)             -> fd             */
+#define SYS_CLOSE   10  /* close(fd)              -> 0              */
+#define SYS_READDIR 11  /* readdir(index, namebuf)-> 0 or -1        */
+#define SYS_TIME    12  /* time(rtc_time_t *buf)  -> 0              */
 
 /* fd values */
 #define FD_STDIN    0

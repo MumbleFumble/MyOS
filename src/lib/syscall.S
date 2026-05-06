@@ -58,7 +58,36 @@ sys_wait:
     int  0x80
     ret
 
-/* long sys_exec(const char *name) */
+/* long sys_open(const char *path) */
+.global sys_open
+sys_open:
+    mov  rax, 9         /* SYS_OPEN */
+    int  0x80
+    ret
+
+/* long sys_close(long fd) */
+.global sys_close
+sys_close:
+    mov  rax, 10        /* SYS_CLOSE */
+    int  0x80
+    ret
+
+/* long sys_readdir(long index, char *name_buf) */
+.global sys_readdir
+sys_readdir:
+    mov  rax, 11        /* SYS_READDIR */
+    int  0x80
+    ret
+
+/* long sys_time(sys_time_t *buf) */
+.global sys_time
+sys_time:
+    mov  rax, 12        /* SYS_TIME */
+    int  0x80
+    ret
+
+/* long sys_exec(const char *name, const char *cmdline) */
+/* rdi = name, rsi = cmdline — already in correct regs for arg1/arg2 */
 .global sys_exec
 sys_exec:
     mov  rax, 8         /* SYS_EXEC */

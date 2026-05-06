@@ -38,6 +38,12 @@ void vmm_unmap_page(uint64_t virt);
 int vmm_alloc_pages(uint64_t cr3_phys, uint64_t virt, uint64_t n_pages, uint64_t flags);
 
 /*
+ * Translate a virtual address in an arbitrary address space to its physical
+ * address by walking the page tables.  Returns 0 if the mapping is absent.
+ */
+uint64_t vmm_virt_to_phys(uint64_t cr3_phys, uint64_t virt);
+
+/*
  * Create a new address space (PML4).
  * The boot kernel mapping (PML4[0]) is shared so kernel code stays reachable.
  * Returns the physical address of the new PML4, or 0 on OOM.

@@ -8,6 +8,17 @@
 /* Kernel stack size per task (8 KiB). */
 #define TASK_STACK_SIZE  8192
 
+/* Maximum open file descriptors per task. fds 0/1/2 are stdin/stdout/stderr. */
+#define MAX_FDS  16
+
+/* Forward-declared to avoid pulling the full fs/vfs.h into every consumer. */
+struct vfs_node;
+
+struct file {
+    struct vfs_node *node;    /* NULL = closed (or special fd 0/1/2) */
+    uint64_t         offset;  /* byte position for next read */
+};
+
 typedef enum {
     TASK_READY   = 0,
     TASK_RUNNING = 1,
@@ -47,6 +58,8 @@ struct task {
     uint32_t      parent_pid;   /* pid of task that spawned this one, 0 = none */
     int32_t       exit_code;    /* exit status, valid when state == TASK_DEAD */
     uint32_t      wait_pid;     /* pid we are waiting on (0 = any child), TASK_WAITING only */
+    /* Open file descriptor table */
+    struct file   fds[MAX_FDS];
 };
 
 /*

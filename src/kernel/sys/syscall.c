@@ -4,11 +4,13 @@
 #include "../arch/port_io.h"
 #include "../proc/sched.h"
 #include "../proc/elf.h"
-#include "../proc/ramdisk.h"
+#include "../fs/vfs.h"
 #include "../mem/vmm.h"
 #include "../mem/pmm.h"
+#include "../mem/kheap.h"
 #include "../drivers/vga.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/rtc.h"
 
 /* -----------------------------------------------------------------------
  * Serial helpers — kept for kernel-side debug; sys_write goes to VGA.
@@ -45,39 +47,40 @@ static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
     return (int64_t)count;
 }
 
-/* SYS_READ: read(fd, buf, count)
- * Reads up to `count` bytes from the keyboard into buf.
- * Blocks until at least one character is available.
- * Stops early on newline (which is included in the returned data). */
+/* SYS_READ: read(fd, buf, count) */
 static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count)
 {
-    if (fd != FD_STDIN)
-        return -1;
-    if (count == 0)
-        return 0;
+    if (count == 0) return 0;
 
-    char *dst = (char *)buf;
-    uint64_t n = 0;
-
-    /* Block for the first character */
-    dst[n++] = keyboard_getchar_wait();
-    /* If that was a newline, return immediately */
-    if (dst[n - 1] == '\n' || dst[n - 1] == '\r') {
-        dst[n - 1] = '\n';
+    /* stdin: keyboard */
+    if (fd == FD_STDIN) {
+        char *dst = (char *)buf;
+        uint64_t n = 0;
+        dst[n++] = keyboard_getchar_wait();
+        if (dst[n - 1] == '\n' || dst[n - 1] == '\r') {
+            dst[n - 1] = '\n';
+            return (int64_t)n;
+        }
+        while (n < count) {
+            char c = keyboard_getchar();
+            if (!c) break;
+            dst[n++] = c;
+            if (c == '\n' || c == '\r') { dst[n - 1] = '\n'; break; }
+        }
         return (int64_t)n;
     }
 
-    /* Non-blocking drain for the rest */
-    while (n < count) {
-        char c = keyboard_getchar();
-        if (!c) break;
-        dst[n++] = c;
-        if (c == '\n' || c == '\r') {
-            dst[n - 1] = '\n';
-            break;
-        }
+    /* file fd */
+    if (fd >= 3 && fd < MAX_FDS) {
+        struct task *t = sched_current_task();
+        struct vfs_node *node = (struct vfs_node *)t->fds[fd].node;
+        if (!node) return -1;
+        int64_t r = vfs_read(node, t->fds[fd].offset, count, (uint8_t *)buf);
+        if (r > 0) t->fds[fd].offset += (uint64_t)r;
+        return r;
     }
-    return (int64_t)n;
+
+    return -1;
 }
 
 /* SYS_EXIT: exit(status) */
@@ -143,27 +146,85 @@ static int64_t sys_wait(uint64_t pid)
     return (int64_t)sched_wait_pid((uint32_t)pid);
 }
 
-/* SYS_EXEC: exec(name) — load a named program from the ramdisk and run it.
- * Returns the new task's pid, or -1 on error.
- * The new task's parent_pid is set to the caller's pid. */
-static int64_t sys_exec(uint64_t name_va)
+/* SYS_EXEC: exec(name, cmdline) — load a named program from the VFS and run it.
+ * arg1 = name virtual address (just the program name, looked up in VFS)
+ * arg2 = cmdline virtual address (full command line including progname, or 0)
+ * Returns the new task's pid, or -1 on error. */
+static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
 {
-    const char *name = (const char *)name_va;
-    const ramdisk_entry_t *entry = ramdisk_find(name);
-    if (!entry) return -1;
+    const char *name    = (const char *)name_va;
+    const char *cmdline = cmdline_va ? (const char *)cmdline_va : name;
+
+    /* First try the VFS (ramfs + future disk) */
+    vfs_node_t *node = vfs_open(name);
+    if (!node) return -1;
+
+    /* Read the entire file into a kernel buffer via kheap */
+    uint64_t fsz = node->size;
+    uint8_t *buf = (uint8_t *)kmalloc(fsz);
+    if (!buf) { vfs_close(node); return -1; }
+    vfs_read(node, 0, fsz, buf);
+    vfs_close(node);
 
     elf_result_t er;
-    if (elf_load(entry->data, entry->size, &er) != 0) return -1;
+    int r = elf_load(buf, fsz, cmdline, &er);
+    kfree(buf);
+    if (r != 0) return -1;
 
     uint32_t caller_pid = sched_current_task()->pid;
-    uint32_t child_pid  = user_task_create(entry->name, er.cr3, er.entry, er.ustack);
+    uint32_t child_pid  = user_task_create(name, er.cr3, er.entry, er.ustack);
     if (child_pid == 0) return -1;
 
-    /* Set parent relationship so SYS_WAIT can find this child */
     struct task *child = sched_find_by_pid(child_pid);
     if (child) child->parent_pid = caller_pid;
 
     return (int64_t)child_pid;
+}
+
+/* SYS_OPEN: open(path) -> fd, or -1 on not-found / table full */
+static int64_t sys_open(uint64_t path_va)
+{
+    const char *path = (const char *)path_va;
+    vfs_node_t *node = vfs_open(path);
+    if (!node) return -1;
+
+    struct task *t = sched_current_task();
+    for (int fd = 3; fd < MAX_FDS; fd++) {
+        if (t->fds[fd].node == 0) {
+            t->fds[fd].node   = node;
+            t->fds[fd].offset = 0;
+            return (int64_t)fd;
+        }
+    }
+    vfs_close(node);   /* no free slot */
+    return -1;
+}
+
+/* SYS_CLOSE: close(fd) -> 0 or -1 */
+static int64_t sys_close(uint64_t fd_u)
+{
+    int fd = (int)fd_u;
+    if (fd < 3 || fd >= MAX_FDS) return -1;
+    struct task *t = sched_current_task();
+    if (!t->fds[fd].node) return -1;
+    vfs_close((vfs_node_t *)t->fds[fd].node);
+    t->fds[fd].node   = 0;
+    t->fds[fd].offset = 0;
+    return 0;
+}
+
+/* SYS_READDIR: readdir(index, name_buf) -> 0 or -1 */
+static int64_t sys_readdir(uint64_t index, uint64_t name_buf_va)
+{
+    return (int64_t)vfs_readdir((uint32_t)index, (char *)name_buf_va);
+}
+
+/* SYS_TIME: time(buf) — write current RTC time into caller's struct */
+static int64_t sys_time(uint64_t buf_va)
+{
+    rtc_time_t *t = (rtc_time_t *)buf_va;
+    rtc_read(t);
+    return 0;
 }
 
 /* -----------------------------------------------------------------------
@@ -173,15 +234,19 @@ static int64_t sys_exec(uint64_t name_va)
 int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     switch (nr) {
-    case SYS_WRITE:  return sys_write(arg1, arg2, arg3);
-    case SYS_READ:   return sys_read(arg1, arg2, arg3);
-    case SYS_EXIT:   return sys_exit(arg1);
-    case SYS_SBRK:   return sys_sbrk(arg1);
-    case SYS_CLEAR:  return sys_clear();
-    case SYS_GETPID: return sys_getpid();
-    case SYS_WAIT:   return sys_wait(arg1);
-    case SYS_EXEC:   return sys_exec(arg1);
-    default:         return -1;  /* ENOSYS */
+    case SYS_WRITE:   return sys_write(arg1, arg2, arg3);
+    case SYS_READ:    return sys_read(arg1, arg2, arg3);
+    case SYS_EXIT:    return sys_exit(arg1);
+    case SYS_SBRK:    return sys_sbrk(arg1);
+    case SYS_CLEAR:   return sys_clear();
+    case SYS_GETPID:  return sys_getpid();
+    case SYS_WAIT:    return sys_wait(arg1);
+    case SYS_EXEC:    return sys_exec(arg1, arg2);
+    case SYS_OPEN:    return sys_open(arg1);
+    case SYS_CLOSE:   return sys_close(arg1);
+    case SYS_READDIR: return sys_readdir(arg1, arg2);
+    case SYS_TIME:    return sys_time(arg1);
+    default:          return -1;  /* ENOSYS */
     }
 }
 
