@@ -48,6 +48,34 @@ void sched_set_policy(struct sched_policy *p)
         active_policy->init();
 }
 
+int sched_get_stats(task_stat_t *buf, int max)
+{
+    int n = 0;
+    for (uint32_t i = 0; i < task_count && n < max; i++) {
+        struct task *t = &tasks[i];
+        if (t->state == TASK_DEAD)
+            continue;
+        buf[n].pid            = t->pid;
+        buf[n].state          = (uint8_t)t->state;
+        buf[n]._pad[0]        = 0;
+        buf[n]._pad[1]        = 0;
+        buf[n]._pad[2]        = 0;
+        buf[n].total_ticks    = t->total_ticks;
+        buf[n].wait_ticks     = t->wait_ticks;
+        buf[n].syscall_count  = t->syscall_count;
+        buf[n].io_block_count = t->io_block_count;
+        /* Copy name, truncated to 15 chars */
+        int j = 0;
+        while (j < 15 && t->name && t->name[j]) {
+            buf[n].name[j] = t->name[j];
+            j++;
+        }
+        buf[n].name[j] = '\0';
+        n++;
+    }
+    return n;
+}
+
 /* Forward declaration */
 static void task_entry_trampoline(void);
 

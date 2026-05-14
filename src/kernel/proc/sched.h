@@ -152,3 +152,24 @@ int32_t sched_wait_pid(uint32_t pid);
 
 /* Low-level context switch (context_switch.S). */
 void context_switch(uint64_t *old_rsp, uint64_t new_rsp);
+
+/* -----------------------------------------------------------------------
+ * Telemetry snapshot — one per task, written by SYS_TELEMETRY.
+ * Layout is stable; userspace mirrors it in lib/syscall.h.
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    uint32_t pid;
+    uint8_t  state;      /* task_state_t cast to uint8 */
+    uint8_t  _pad[3];
+    char     name[16];   /* truncated to 15 chars + NUL */
+    uint64_t total_ticks;
+    uint64_t wait_ticks;
+    uint64_t syscall_count;
+    uint64_t io_block_count;
+} task_stat_t;           /* 56 bytes */
+
+/*
+ * Fill 'buf' with up to 'max' task_stat_t snapshots.
+ * Returns the number of active (non-DEAD) tasks copied.
+ */
+int sched_get_stats(task_stat_t *buf, int max);

@@ -86,6 +86,20 @@ sys_time:
     int  0x80
     ret
 
+/* long sys_telemetry(task_stat_t *buf, long max_tasks) */
+.global sys_telemetry
+sys_telemetry:
+    mov  rax, 13        /* SYS_TELEMETRY */
+    int  0x80
+    ret
+
+/* long sys_setpolicy(long index) */
+.global sys_setpolicy
+sys_setpolicy:
+    mov  rax, 14        /* SYS_SETPOLICY */
+    int  0x80
+    ret
+
 /* long sys_exec(const char *name, const char *cmdline) */
 /* rdi = name, rsi = cmdline — already in correct regs for arg1/arg2 */
 .global sys_exec

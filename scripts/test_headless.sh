@@ -47,9 +47,12 @@ echo "[test] boot complete"
 
   type_word "date"
   type_word "ls"
-  type_word "cat motd"
-  type_word "cat test.txt"
   type_word "getpid"
+  type_word "sched"
+  type_word "policy 1"
+  type_word "sched"
+  type_word "policy 0"
+  type_word "sched"
   type_word "memtest"
 
   sleep 0.5

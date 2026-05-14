@@ -43,6 +43,46 @@ static int streq(const char *a, const char *b) {
     return *a == *b;
 }
 
+static void cmd_sched(void)
+{
+    /* State names matching task_state_t order */
+    static const char * const state_names[] = { "READY", "RUN  ", "DEAD ", "WAIT " };
+    task_stat_t stats[32];
+    long count = sys_telemetry(stats, 32);
+    if (count < 0) { puts_u("sched: telemetry failed\r\n"); return; }
+    char buf[24];
+    puts_u("PID  STATE  SYSCALLS  IO_BLKS  TICKS     WAIT      NAME\r\n");
+    puts_u("---  -----  --------  -------  --------  --------  ----\r\n");
+    for (long i = 0; i < count; i++) {
+        task_stat_t *s = &stats[i];
+        /* PID */
+        itoa(s->pid, buf);
+        int pad = 5 - (int)slen(buf); while (pad-- > 0) puts_u(" ");
+        puts_u(buf); puts_u("  ");
+        /* State */
+        unsigned char st = s->state < 4 ? s->state : 0;
+        puts_u(state_names[st]); puts_u("  ");
+        /* syscall_count */
+        itoa((long)s->syscall_count, buf);
+        pad = 8 - (int)slen(buf); while (pad-- > 0) puts_u(" ");
+        puts_u(buf); puts_u("  ");
+        /* io_block_count */
+        itoa((long)s->io_block_count, buf);
+        pad = 7 - (int)slen(buf); while (pad-- > 0) puts_u(" ");
+        puts_u(buf); puts_u("  ");
+        /* total_ticks */
+        itoa((long)s->total_ticks, buf);
+        pad = 8 - (int)slen(buf); while (pad-- > 0) puts_u(" ");
+        puts_u(buf); puts_u("  ");
+        /* wait_ticks */
+        itoa((long)s->wait_ticks, buf);
+        pad = 8 - (int)slen(buf); while (pad-- > 0) puts_u(" ");
+        puts_u(buf); puts_u("  ");
+        /* name */
+        puts_u(s->name); puts_u("\r\n");
+    }
+}
+
 static void cmd_memtest(void)
 {
     char num[24];
@@ -119,6 +159,24 @@ void _start(long argc, char **argv)
         if (streq(cmd, "exit"))    { puts_u("bye!\r\n"); sys_exit(0); }
         if (streq(cmd, "clear"))   { sys_clear(); puts_u("> "); continue; }
         if (streq(cmd, "memtest")) { cmd_memtest(); puts_u("> "); continue; }
+        if (streq(cmd, "sched"))   { cmd_sched();   puts_u("> "); continue; }
+
+        if (streq(cmd, "policy")) {
+            if (!arg[0]) {
+                puts_u("usage: policy <0|1>  (0=round-robin  1=weighted-fair)\r\n> ");
+                continue;
+            }
+            long idx = arg[0] - '0';
+            long r   = sys_setpolicy(idx);
+            if (r < 0) {
+                puts_u("policy: unknown index\r\n> ");
+            } else {
+                puts_u("policy set to ");
+                puts_u(idx == SCHED_POLICY_WF ? "weighted-fair" : "round-robin");
+                puts_u("\r\n> ");
+            }
+            continue;
+        }
 
         if (streq(cmd, "getpid")) {
             char buf[16];
@@ -152,7 +210,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, memtest, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, policy <0|1>, memtest, clear, exit\r\n> ");
             continue;
         }
 

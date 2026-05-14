@@ -14,7 +14,13 @@
 #define SYS_OPEN    9   /* open(path)             -> fd             */
 #define SYS_CLOSE   10  /* close(fd)              -> 0              */
 #define SYS_READDIR 11  /* readdir(index, namebuf)-> 0 or -1        */
-#define SYS_TIME    12  /* time(rtc_time_t *buf)  -> 0              */
+#define SYS_TIME      12  /* time(rtc_time_t *buf)       -> 0          */
+#define SYS_TELEMETRY 13  /* telemetry(buf, max_tasks)   -> task count */
+#define SYS_SETPOLICY 14  /* setpolicy(index)            -> 0 or -1   */
+
+/* Scheduling policy indices for SYS_SETPOLICY */
+#define SCHED_POLICY_RR  0   /* round-robin (default)   */
+#define SCHED_POLICY_WF  1   /* weighted-fair           */
 
 /* fd values */
 #define FD_STDIN    0

@@ -3,6 +3,7 @@
 #include "../arch/gdt.h"
 #include "../arch/port_io.h"
 #include "../proc/sched.h"
+#include "../proc/policy_wf.h"
 #include "../proc/elf.h"
 #include "../fs/vfs.h"
 #include "../mem/vmm.h"
@@ -227,12 +228,47 @@ static int64_t sys_time(uint64_t buf_va)
     return 0;
 }
 
+/* SYS_TELEMETRY: telemetry(buf_va, max_tasks)
+ * Copies up to max_tasks task_stat_t records into the caller's buffer.
+ * Returns the number of records written, or -1 on bad args. */
+static int64_t sys_telemetry(uint64_t buf_va, uint64_t max_tasks)
+{
+    if (!buf_va || max_tasks == 0 || max_tasks > MAX_TASKS)
+        return -1;
+    task_stat_t *buf = (task_stat_t *)buf_va;
+    return (int64_t)sched_get_stats(buf, (int)max_tasks);
+}
+
+/* SYS_SETPOLICY: setpolicy(index) — swap the active scheduling policy.
+ * index 0 = round-robin, 1 = weighted-fair.
+ * Returns 0 on success, -1 if the index is unknown. */
+static int64_t sys_setpolicy(uint64_t index)
+{
+    switch (index) {
+    case SCHED_POLICY_RR:
+        sched_set_policy(0);  /* NULL reverts to built-in round-robin */
+        return 0;
+    case SCHED_POLICY_WF:
+        sched_set_policy(&wf_policy);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
 
 int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
+    /* Count every syscall against the calling task (excluding SYS_EXIT
+     * since the task is already tearing down). */
+    if (nr != SYS_EXIT) {
+        struct task *ct = sched_current_task();
+        if (ct) ct->syscall_count++;
+    }
+
     switch (nr) {
     case SYS_WRITE:   return sys_write(arg1, arg2, arg3);
     case SYS_READ:    return sys_read(arg1, arg2, arg3);
@@ -246,6 +282,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);
+    case SYS_TELEMETRY: return sys_telemetry(arg1, arg2);
+    case SYS_SETPOLICY: return sys_setpolicy(arg1);
     default:          return -1;  /* ENOSYS */
     }
 }
