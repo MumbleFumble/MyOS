@@ -1,375 +1,256 @@
-# MyOS
+# MyOS — AI-Native OS Research Kernel
 
-MyOS is a 64-bit microkernel-style operating system built from scratch as a systems programming project.
-The goal is to implement:
+MyOS is an experimental research kernel exploring whether machine learning policies
+can replace or outperform classical heuristics in operating system resource management.
 
-- 64-bit bootloader (GRUB)
-- Paging + virtual memory
-- Interrupt handling + driver layer
-- System calls
-- Process scheduler
-- User-space ELF loader
-- Minimal libc
-- Simple shell
+The project is a research prototype, not a general-purpose operating system. Its primary
+purpose is to serve as a platform for studying learned, adaptive kernel decision-making
+in a controlled, measurable environment.
+
+---
+
+## Research Motivation
+
+Classical operating systems manage resources — CPU time, memory pages, I/O queues —
+using hand-written heuristics: round-robin scheduling, LRU page replacement, deadline
+I/O prioritization. These heuristics are well-studied, but they are static. They do
+not adapt to workload characteristics, hardware topology, or application behavior over time.
+
+The central research question this project investigates is:
+
+> **Can learned policies, trained on system telemetry, make better resource management
+> decisions than classical OS heuristics — and can those improvements be measured?**
+
+This is an open problem in systems research. Recent work in ML-for-systems (e.g. learned
+index structures, neural network-based cache eviction, RL-driven compilers) suggests
+that the premise is plausible in narrow domains. This kernel is an attempt to study it
+at the OS policy layer, where decisions have direct, measurable effects on latency,
+throughput, and resource utilization.
+
+---
+
+## System Overview
+
+MyOS is structured around a strict three-layer separation:
+
+```
+┌────────────────────────────────────────────┐
+│           Deterministic Kernel Core        │
+│  (memory, interrupts, syscalls, I/O, ELF)  │
+└────────────────┬───────────────────────────┘
+                 │ exposes structured telemetry
+                 ▼
+┌────────────────────────────────────────────┐
+│         Policy Interface Layer             │
+│  (pluggable: heuristic or learned model)   │
+└────────────────┬───────────────────────────┘
+                 │ emits decisions
+                 ▼
+┌────────────────────────────────────────────┐
+│         Resource Dispatch                  │
+│  (scheduler, MMU, I/O queue manager)       │
+└────────────────────────────────────────────┘
+```
+
+**Deterministic kernel core** — handles hardware initialization, interrupt routing,
+virtual memory, ELF loading, and the syscall ABI. This layer is not subject to learned
+policies and is kept stable for reproducible benchmarking.
+
+**Policy interface layer** — a narrow, well-defined interface through which resource
+management decisions are made. Any conforming policy (a classical algorithm or a
+trained model) can be plugged in without modifying the kernel core. A baseline
+deterministic policy is always available as the reference implementation.
+
+**Resource dispatch** — executes the decisions emitted by the policy layer: selecting
+the next process to run, choosing a page to evict, ordering I/O requests. This layer
+records outcomes as telemetry, which feeds back into the policy evaluation loop.
+
+---
+
+## Current Kernel Status
+
+The kernel currently implements a working deterministic foundation:
+
+- 64-bit x86 boot via GRUB/Multiboot
+- 4-level paging, virtual memory, kernel heap
+- Physical memory manager (PMM)
+- Preemptive round-robin scheduler with per-task CR3
+- IDT, IRQ routing, PIC, PIT timer
+- `int 0x80` syscall interface (ring-3 trap gate)
+- ELF64 loader with private per-process address spaces
+- VGA terminal driver, PS/2 keyboard driver
+- RTC driver
+- ATA PIO disk driver
+- Simple in-kernel VFS with ramfs and MyFS disk backend
+- User-space malloc, shell, basic utilities (`ls`, `cat`, `date`, `exec`)
+
+This deterministic baseline is the comparison target against which all learned
+policies will be evaluated.
+
+---
+
+## Research Roadmap
+
+### Phase 1 — AI-Driven CPU Scheduler (active focus)
+
+The scheduler is the first subsystem targeted for learned policy replacement.
+
+**Goal:** Replace the round-robin scheduling heuristic with a policy that observes
+per-task telemetry (run time, wait time, I/O blocking rate, syscall frequency) and
+learns to assign CPU quanta to minimize a defined cost function (e.g. mean latency,
+throughput, fairness index).
+
+**Approach:**
+- Instrument the scheduler to emit per-context-switch telemetry records
+- Define a policy interface: given current run-queue state, emit a `next_task` decision
+- Implement a baseline deterministic policy (round-robin, CFS-approximation)
+- Train an offline model on recorded telemetry traces
+- Evaluate the learned policy against the baseline using reproducible QEMU workloads
+
+**Metrics:** mean scheduling latency, context switch overhead, CPU utilization,
+starvation incidence.
+
+---
+
+### Phase 2 — AI-Based Memory / Page Replacement
+
+**Goal:** Replace static page eviction policy (e.g. LRU approximation via accessed bits)
+with a learned policy that predicts which page is least likely to be referenced in the
+near future, using access pattern history as input.
+
+**Approach:**
+- Instrument the VMM to record page access events (fault address, task, timestamp)
+- Define a page replacement policy interface: given current page frame state, emit
+  an eviction candidate
+- Implement a baseline CLOCK/LRU approximation policy
+- Train a model on recorded access traces
+- Evaluate using page fault rate and working-set hit rate as primary metrics
+
+**Metrics:** page fault rate, working set hit rate, eviction accuracy vs. OPT (Bélády's).
+
+---
+
+### Phase 3 — AI-Assisted I/O Scheduling
+
+**Goal:** Replace static I/O request ordering (FCFS or deadline) with a learned policy
+that prioritizes I/O requests based on predicted latency sensitivity and workload type.
+
+**Approach:**
+- Instrument the ATA/disk layer to record request arrival time, queue depth, and
+  service time per request
+- Define an I/O policy interface: given a pending request queue, emit a reordered
+  service sequence
+- Implement a baseline FCFS and simple deadline policy
+- Evaluate a learned reordering policy against both baselines
+
+**Metrics:** mean I/O latency, throughput (sectors/sec), queue starvation rate.
+
+---
+
+## Benchmarking Philosophy
+
+All learned policies are evaluated against deterministic baselines on identical
+workloads running inside QEMU. Reproducibility is a design requirement:
+the same workload run twice must produce comparable telemetry.
+
+Primary metrics across all subsystems:
+
+| Metric                    | Subsystem        |
+|---------------------------|------------------|
+| Mean scheduling latency   | CPU scheduler    |
+| Context switch overhead   | CPU scheduler    |
+| Page fault rate           | Memory manager   |
+| Cache / working-set hits  | Memory manager   |
+| Mean I/O latency          | I/O scheduler    |
+| Disk throughput           | I/O scheduler    |
+
+Comparison targets are modeled on documented Linux behavior (CFS scheduling,
+CLOCK page replacement, CFQ/deadline I/O) rather than on Linux kernel code directly.
+
+---
+
+## Non-Goals
+
+This project explicitly does not aim to:
+
+- Replace or compete with Linux, Windows, or any production OS
+- Provide a general-purpose desktop or server environment
+- Implement a full POSIX-compatible interface
+- Achieve production-level stability, security, or hardware support
+
+It is a research and experimentation kernel. Stability is valued insofar as it enables
+reproducible benchmarks; beyond that, simplicity of instrumentation takes priority.
+
+---
 
 ## Build & Run
 
 ### Requirements
 
-- GCC cross-compiler (`x86_64-elf-gcc`)
+- GCC cross-compiler: `x86_64-elf-gcc`
 - GNU binutils for `x86_64-elf`
-- QEMU (`qemu-system-x86_64`)
-- `grub-mkrescue` and `xorriso`
+- QEMU: `qemu-system-x86_64`
+- `grub-mkrescue`, `xorriso`
+- Python 3 (for disk image builder)
 - `make`
 
-### Quick start (via WSL/Ubuntu)
-
-On Windows, the simplest setup is using WSL with Ubuntu.
-
-In PowerShell (once):
-
-```powershell
-wsl --install -d Ubuntu
-```
-
-Then, inside Ubuntu:
+### Quick start (WSL/Ubuntu)
 
 ```bash
+# Inside WSL Ubuntu
 sudo apt update
-sudo apt install build-essential bison flex libgmp3-dev libmpc-dev libmpfr-dev texinfo libisl-dev
-sudo apt install qemu-system-x86 grub-pc-bin xorriso
-sudo apt install nasm
-```
+sudo apt install build-essential bison flex libgmp3-dev libmpc-dev libmpfr-dev \
+                 texinfo libisl-dev qemu-system-x86 grub-pc-bin xorriso python3
 
-Build a cross-compiler (one-time):
-
-```bash
+# Cross-compiler (one-time build, ~10 min)
 export PREFIX="$HOME/opt/cross"
 export TARGET=x86_64-elf
 export PATH="$PREFIX/bin:$PATH"
-
-mkdir -p $HOME/src
-cd $HOME/src
-
-# binutils
-wget https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz
-tar xf binutils-2.42.tar.xz
-mkdir binutils-build && cd binutils-build
-../binutils-2.42/configure --target=$TARGET --prefix="$PREFIX" --with-sysroot --disable-nls --disable-werror
-make -j"$(nproc)"
-make install
-
-# gcc (C only)
-cd $HOME/src
-wget https://ftp.gnu.org/gnu/gcc/gcc-14.2.0/gcc-14.2.0.tar.xz
-tar xf gcc-14.2.0.tar.xz
-mkdir gcc-build && cd gcc-build
-../gcc-14.2.0/configure --target=$TARGET --prefix="$PREFIX" --disable-nls --enable-languages=c --without-headers
-make all-gcc -j"$(nproc)"
-make all-target-libgcc -j"$(nproc)"
-make install-gcc
-make install-target-libgcc
+# ... (see scripts/build_toolchain.sh for full steps)
 ```
 
-Ensure the cross tools are on your `PATH` (e.g. in `~/.bashrc`):
-
-```bash
-export PATH="$HOME/opt/cross/bin:$PATH"
-```
-
-### Building MyOS
-
-From WSL/Ubuntu, in this repo (e.g. `/mnt/c/Users/<you>/Documents/Projects/MyOS`):
+### Build and boot
 
 ```bash
 cd /mnt/c/Users/<you>/Documents/Projects/MyOS
-make
-make iso
+make iso    # builds kernel ELF + ISO + disk image
+make run    # boots under QEMU
 ```
 
-This produces `build/myos.elf` and `build/myos.iso`.
+`make run` launches QEMU with a VGA window and serial debug output on stdout.
+Serial output includes structured `[serial]` boot messages useful for automated testing.
 
-### Running under QEMU
-
-Still inside WSL/Ubuntu:
+### Headless testing
 
 ```bash
-make run
+bash scripts/test_headless.sh
 ```
 
-You should see a QEMU window with a text message from the kernel.
+Boots QEMU without a display, injects keystrokes via the QEMU monitor, and captures
+serial output for automated verification.
 
+---
 
-PHASE 0 — Repo Setup (Day 0)
-0.1 Repository
+## Repository Layout
 
- Create GitHub repo
+```
+src/kernel/
+  arch/       — GDT, IDT, IRQ, PIC, PIT, port I/O
+  mem/        — PMM, VMM (4-level paging), kernel heap
+  proc/       — scheduler, ELF loader, context switch
+  sys/        — syscall dispatch
+  drivers/    — VGA, keyboard, RTC, ATA
+  fs/         — VFS, ramfs, MyFS disk backend
+src/lib/      — user-space syscall stubs, malloc
+user/         — shell (hello.c) and user programs
+disk_files/   — files packed into the MyFS disk image at build time
+scripts/      — mkfs_myfs.py (disk builder), test_headless.sh
+boot/         — GRUB config, linker scripts
+```
 
- Initialize folder structure
+---
 
- Add starter README
+## License
 
- Add Makefile skeleton
+Research prototype. No warranty. See LICENSE for details.
 
- Set up QEMU run command
-
- Add .gitignore
-
-0.2 Toolchain
-
- Install x86_64-elf binutils
-
- Install x86_64-elf gcc cross compiler
-
- Install QEMU
-
- Install NASM
-
-⭐ PHASE 1 — Bootloader & Entering Long Mode
-
-(Goal: get the CPU into a known state and running your C kernel code.)
-
-1.1 GRUB Bootloader + Multiboot Header
-
-GRUB loads your kernel into memory and jumps to it — without a bootloader your CPU has no idea where your OS is.
-
-1.2 Early stack setup
-
-The CPU starts with no stack; you must create one immediately so any C code (which uses a stack) can function.
-
-1.3 VGA text write (“Hello”)
-
-A minimal visual output proves your kernel is actually executing before you move on to complex features.
-
-1.4 Build minimal GDT (Global Descriptor Table)
-
-Entering 64-bit mode requires a 64-bit code segment — the GDT provides this. Without it, the CPU faults.
-
-1.5 Enable PAE + Long Mode + Paging
-
-The CPU cannot enter 64-bit mode without paging enabled; paging cannot be enabled without PAE; so these steps must occur in strict order.
-
-1.6 Far jump into 64-bit mode
-
-The CPU enters long mode only on a far jump into the 64-bit code segment defined in your GDT, so this transition must happen after paging.
-
-⭐ PHASE 2 — Memory Management
-
-(Goal: control memory safely so the rest of the OS has a stable foundation.)
-
-2.1 Parse physical memory map
-
-You can’t allocate memory until you know which RAM regions are usable — this is why we gather the memory map first.
-
-2.2 Build physical page allocator (bitmap/buddy)
-
-Higher-level memory management depends on the ability to hand out raw physical pages, so this must come first.
-
-2.3 Set up virtual memory (paging structures)
-
-Without mapping memory virtually, user/kernel isolation and advanced memory features are impossible — paging is the backbone of the OS.
-
-2.4 Implement kmalloc() (kernel heap)
-
-Kernel data structures need dynamic memory; you cannot build drivers, processes, or anything flexible without a heap.
-
-2.5 Higher-half kernel mapping (optional but recommended)
-
-Mapping the kernel high in memory avoids collisions with user memory and simplifies the design of future memory isolation.
-
-⭐ PHASE 3 — Interrupts & Basic Drivers
-
-(Goal: let hardware talk to the OS.)
-
-3.1 Build IDT (Interrupt Descriptor Table)
-
-Interrupt handling is required before timers, keyboard input, system calls, and exceptions; so the IDT is foundational.
-
-3.2 PIC/APIC initialization
-
-Hardware IRQ numbers overlap CPU exceptions by default; remapping them prevents random crashes when enabling interrupts.
-
-3.3 Enable timer interrupts (PIT or APIC timer)
-
-Multitasking and scheduling depend on periodic timer signals; without a timer, you cannot switch processes deterministically.
-
-3.4 Keyboard driver
-
-A simple driver proves interrupts, IRQ routing, and device I/O are all working before moving into more advanced kernel features.
-
-⭐ PHASE 4 — System Calls & User/Kernel Boundary
-
-(Goal: safely switch between unprivileged user code and privileged kernel code.)
-
-4.1 Set up user mode (ring 3 segments + TSS)
-
-You must configure CPU privilege levels before running user programs; otherwise user code could crash or control the CPU.
-
-4.2 Implement syscall entry point (int 0x80 or syscall)
-
-This is the controlled “doorway” between user programs and the kernel; it must exist before any user program can do I/O or allocation.
-
-4.3 Create syscall table (write, exit, sleep, etc.)
-
-Each kernel service needs an ID and handler — without a syscall table, user programs have no abilities and cannot interact with hardware.
-
-4.4 Return-to-user with iretq
-
-You must verify safe transitions back to unprivileged mode before you can run any user-space program.
-
-⭐ PHASE 5 — Processes & Scheduling
-
-(Goal: run multiple programs, switching between them safely.)
-
-5.1 Define process_t structure
-
-You need a structure to represent each process (registers, memory space, PID) before you can switch between them or create new ones.
-
-5.2 Build context switch mechanism
-
-The scheduler can’t function until you define how to save and restore CPU registers and stacks; context switch is the prerequisite.
-
-5.3 Implement Round-Robin scheduler
-
-With context switching working, the scheduler decides which process runs next; this is the smallest viable scheduler.
-
-5.4 Implement process creation (spawn() or fork())
-
-A scheduler is useless without processes; so once scheduling is stable, you can create new user programs.
-
-5.5 Test two processes running alternately
-
-Successful alternating output verifies timer interrupts, kernel stack switching, and CR3 switching all work correctly together.
-
-⭐ PHASE 6 — ELF Loading (Running Real Programs)
-
-(Goal: execute compiled C user programs.)
-
-6.1 Parse ELF file header
-
-You must know where executable code and data live before you can load them into memory.
-
-6.2 Map ELF segments into new process address space
-
-The process must have correct memory layout or execution will fault instantly; mapping must occur before setting RIP.
-
-6.3 Set up user stack
-
-User mode cannot run without a valid stack pointer; this must be created before returning to user mode.
-
-6.4 Switch to user mode and jump to entry point
-
-This is the moment the OS becomes “real”: executing actual user binaries.
-
-⭐ PHASE 7 — File System
-
-(Goal: persistent storage and user programs you can load by name.)
-
-7.1 Create simple RAMFS or TarFS
-
-Before implementing a disk filesystem, an in-memory filesystem gives you file abstraction quickly and safely.
-
-7.2 Implement open, read, write, close syscalls
-
-User programs need these to access any files; without these syscalls, the filesystem is unusable.
-
-7.3 Add path resolution logic
-
-Commands like ls depend on navigating directories and paths like /bin/app.
-
-⭐ PHASE 8 — Shell & Userland
-
-(Goal: provide a user interface to run programs on your OS.)
-
-8.1 Build a simple shell
-
-The shell is the simplest interactive test for syscalls, the filesystem, ELF loading, and process creation.
-
-8.2 Add basic utilities (ls, cat, echo, ps)
-
-These confirm multiple kernel components (FS, syscalls, scheduler) work under real-world usage.
-
-8.3 Add error handling
-
-After userland is running, you need robust kernel panics and error paths so debugging becomes manageable.
-
-⭐ PHASE 9 — (Optional) Advanced Kernel Features
-
-(Goal: improve capabilities once OS is stable.)
-
-9.1 Threads & synchronization primitives
-
-Once multiple user processes work, you can support multiple threads within a process.
-
-9.2 Virtual memory improvements (mmap, shared memory)
-
-Enables modern applications, dynamic libraries, and advanced IPC.
-
-9.3 Graphics / framebuffer mode
-
-Move beyond VGA to a graphical OS.
-
-9.4 Networking stack
-
-The last major subsystem; requires stable memory, interrupts, and userland tools first.
-
-Milestone:
-✔ Boot OS → greet → type commands → run user programs.
-
-PHASE 9 — Advanced Features (Optional but impressive)
-Threads
-
- Thread creation
-
- Mutexes
-
- Condition variables
-
-Memory
-
- mmap
-
- shared memory
-
-Drivers
-
- Framebuffer graphics
-
- Mouse
-
- Storage driver
-
-Networking
-
- RTL8139 driver
-
- Minimal TCP/IP stack
-
-PHASE 10 — Documentation + GitHub Polish (Final Week)
-10.1 Documentation
-
- Memory map diagram
-
- Boot sequence diagram
-
- ISR flow diagram
-
- Scheduler timeline
-
- Syscall table
-
- VFS diagram
-
-10.2 GitHub polish
-
- Add build badges
-
- Add GIFs (screen recordings)
-
- Complete README
-
- Add CONTRIBUTING.md
-
- Add architecture overview in docs/
-
- Tag releases (v0.1, v1.0, etc.)

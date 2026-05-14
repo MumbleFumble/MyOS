@@ -8,7 +8,7 @@ static volatile uint32_t ticks = 0;
 static void timer_handler(void)
 {
     ++ticks;
-    sched_tick();
+    sched_tick((uint64_t)ticks);
 }
 
 void timer_init(void)

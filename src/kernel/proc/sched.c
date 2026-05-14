@@ -2,6 +2,7 @@
 #include "../mem/kheap.h"
 #include "../mem/vmm.h"
 #include "../arch/gdt.h"
+#include "../arch/timer.h"
 
 /* -----------------------------------------------------------------------
  * Task table
@@ -11,6 +12,41 @@ static struct task tasks[MAX_TASKS];
 static uint32_t   task_count = 0;
 static uint32_t   current    = 0;   /* index of currently running task */
 static uint32_t   next_pid   = 1;
+
+/* -----------------------------------------------------------------------
+ * Built-in round-robin policy
+ * ----------------------------------------------------------------------- */
+
+static uint32_t rr_pick_next(uint32_t cur, const struct task *t,
+                              uint32_t count, uint64_t tick)
+{
+    (void)tick;
+    uint32_t next  = (cur + 1) % count;
+    uint32_t tries = 0;
+    while ((t[next].state == TASK_DEAD || t[next].state == TASK_WAITING)
+           && tries < count) {
+        next = (next + 1) % count;
+        tries++;
+    }
+    return next;
+}
+
+static struct sched_policy rr_policy = {
+    .name         = "round-robin",
+    .init         = 0,
+    .pick_next    = rr_pick_next,
+    .task_added   = 0,
+    .task_removed = 0,
+};
+
+static struct sched_policy *active_policy = &rr_policy;
+
+void sched_set_policy(struct sched_policy *p)
+{
+    active_policy = p ? p : &rr_policy;
+    if (active_policy->init)
+        active_policy->init();
+}
 
 /* Forward declaration */
 static void task_entry_trampoline(void);
@@ -74,6 +110,10 @@ uint32_t task_create(const char *name, void (*func)(void))
     t->rsp = (uint64_t)stack_top;
 
     task_count++;
+
+    if (active_policy->task_added)
+        active_policy->task_added(task_count - 1, tasks, task_count);
+
     return t->pid;
 }
 
@@ -93,7 +133,7 @@ void sched_current_exit(void)
     }
 
     __asm__ volatile("sti");
-    sched_tick();
+    sched_tick((uint64_t)timer_ticks());
     for (;;) __asm__ volatile("hlt");
 }
 
@@ -133,29 +173,25 @@ check:
     tasks[current].state    = TASK_WAITING;
     tasks[current].wait_pid = pid;
     __asm__ volatile("sti");
-    sched_tick();
+    sched_tick((uint64_t)timer_ticks());
     /* After being woken we are RUNNING again; re-check */
     goto check;
 }
 
-void sched_tick(void)
+void sched_tick(uint64_t tick)
 {
     if (task_count <= 1)
         return;
 
-    uint32_t old = current;
-
-    /* Round-robin: find the next READY task. */
-    uint32_t next = (current + 1) % task_count;
-    uint32_t tries = 0;
-    while ((tasks[next].state == TASK_DEAD || tasks[next].state == TASK_WAITING)
-           && tries < task_count) {
-        next = (next + 1) % task_count;
-        tries++;
-    }
+    uint32_t old  = current;
+    uint32_t next = active_policy->pick_next(current, tasks, task_count, tick);
 
     if (next == old)
         return; /* nothing else to run */
+
+    /* Accumulate runtime for the outgoing task. */
+    if (tasks[old].last_scheduled_tick <= tick)
+        tasks[old].total_ticks += tick - tasks[old].last_scheduled_tick;
 
     /* Only mark old task READY if it hasn't already exited.
      * sched_current_exit() marks the task DEAD before calling sched_tick();
@@ -164,7 +200,13 @@ void sched_tick(void)
      * an eventual kernel-stack overflow. */
     if (tasks[old].state != TASK_DEAD && tasks[old].state != TASK_WAITING)
         tasks[old].state = TASK_READY;
-    tasks[next].state  = TASK_RUNNING;
+
+    /* Start wait-time accounting if the task is now blocked. */
+    if (tasks[old].state == TASK_WAITING)
+        tasks[old].wait_start_tick = tick;
+
+    tasks[next].state              = TASK_RUNNING;
+    tasks[next].last_scheduled_tick = tick;
     current = next;
 
     /* Update TSS RSP0 to the top of the new task's kernel stack
