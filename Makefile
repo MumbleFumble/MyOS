@@ -30,7 +30,7 @@ SRC_DIR    := src
 KERNEL_SRC_ALL := $(wildcard $(SRC_DIR)/kernel/*.c $(SRC_DIR)/kernel/arch/*.c $(SRC_DIR)/kernel/mem/*.c $(SRC_DIR)/kernel/proc/*.c $(SRC_DIR)/kernel/sys/*.c $(SRC_DIR)/kernel/drivers/*.c $(SRC_DIR)/kernel/fs/*.c)
 # Then exclude isr80.c if it exists (we use isr80.S instead)
 KERNEL_SRC := $(filter-out %/isr80.c, $(KERNEL_SRC_ALL))
-KERNEL_ASM := $(SRC_DIR)/kernel/boot.S $(SRC_DIR)/kernel/arch/idt_load.S $(SRC_DIR)/kernel/arch/gdt_load.S $(SRC_DIR)/kernel/arch/irq_stubs.S $(SRC_DIR)/kernel/arch/isr80.S $(SRC_DIR)/kernel/proc/context_switch.S
+KERNEL_ASM := $(SRC_DIR)/kernel/boot.S $(SRC_DIR)/kernel/arch/idt_load.S $(SRC_DIR)/kernel/arch/gdt_load.S $(SRC_DIR)/kernel/arch/irq_stubs.S $(SRC_DIR)/kernel/arch/exc_stubs.S $(SRC_DIR)/kernel/arch/isr80.S $(SRC_DIR)/kernel/proc/context_switch.S
 KERNEL_OBJ := $(KERNEL_SRC:.c=.o) $(KERNEL_ASM:.S=.o)
 
 .PHONY: all clean run iso

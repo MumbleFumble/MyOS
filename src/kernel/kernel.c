@@ -2,6 +2,7 @@
 #include "arch/gdt.h"
 #include "arch/idt.h"
 #include "arch/irq.h"
+#include "arch/exceptions.h"
 #include "arch/timer.h"
 #include "arch/port_io.h"
 #include "mem/multiboot.h"
@@ -152,6 +153,8 @@ void kernel_main(struct multiboot_info *mb_info)
     serial_puts("[serial] idt_init done\r\n");
     irq_init();
     serial_puts("[serial] irq_init done\r\n");
+    exceptions_init();
+    serial_puts("[serial] exceptions_init done\r\n");
 
     vga_init();
     serial_puts("[serial] vga_init done\r\n");

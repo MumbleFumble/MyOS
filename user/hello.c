@@ -283,8 +283,18 @@ void _start(long argc, char **argv)
             continue;
         }
 
+        if (streq(cmd, "pf")) {
+            /* Deliberately fault from ring 3: write to an unmapped
+             * address. Expect the #PF handler to fire with
+             * cr2=0x50000000000, err=0x6 (not-present, write, user). */
+            puts_u("pf: writing to unmapped 0x50000000000...\r\n");
+            *(volatile char *)0x50000000000UL = 42;
+            puts_u("pf: survived?!\r\n> ");
+            continue;
+        }
+
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, memtest, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

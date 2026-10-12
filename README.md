@@ -241,6 +241,18 @@ near future, using access pattern history as input.
 
 **Metrics:** page fault rate, working set hit rate, eviction accuracy vs. OPT (Bélády's).
 
+**Increment 1 (done, Oct 12 2026) — #PF handler wired:** vector 14 previously
+had no IDT gate (a fault would triple-fault). Now `src/kernel/arch/exc_stubs.S`
+provides a `pf_stub` that forwards the CPU-pushed error code to
+`page_fault_handler()` in `src/kernel/arch/exceptions.c`, which reads CR2,
+decodes the error-code bits (P/W/R, U/S, reserved, I/D) and prints them to
+serial, then halts (no demand pager yet — increment 2). `exceptions_init()`
+installs the gate (`idt_set_gate(14, pf_stub, 0x08, 0x8E)`). Shell command
+`pf` deliberately faults from ring 3 (write to unmapped 0x50000000000);
+`scripts/test_pf.sh` verifies the handler fires with
+`cr2=0x0000050000000000 err=0x0000000000000006 (not-present write user)`
+(2/2 QEMU runs passing).
+
 ---
 
 ### Phase 3 — AI-Assisted I/O Scheduling
