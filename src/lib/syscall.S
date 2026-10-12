@@ -93,6 +93,13 @@ sys_telemetry:
     int  0x80
     ret
 
+/* long sys_telemetry_drain(switch_record_t *buf, long max_records) */
+.global sys_telemetry_drain
+sys_telemetry_drain:
+    mov  rax, 15        /* SYS_TELEMETRY_DRAIN */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:

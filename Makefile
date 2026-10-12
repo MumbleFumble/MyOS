@@ -20,6 +20,10 @@ USER_CFLAGS  := -ffreestanding -O2 -Wall -m64 -std=gnu11 -fno-pic -fno-pie \
 USER_LDFLAGS := -nostdlib -z max-page-size=0x1000 -m elf_x86_64
 
 USER_HELLO_ELF := build/user/hello.elf
+USER_BENCH_CPU_ELF := build/user/bench_cpu.elf
+USER_BENCH_IO_ELF  := build/user/bench_io.elf
+USER_BENCH_MIX_ELF := build/user/bench_mix.elf
+IO_TEST_BIN        := build/io_test.bin
 
 SRC_DIR    := src
 # First collect all C files
@@ -40,6 +44,31 @@ $(USER_HELLO_ELF): user/hello.c src/lib/syscall.S src/lib/malloc.c user/user.ld
 	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S  -o build/user/syscall_u.o
 	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c   -o build/user/malloc_u.o
 	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/hello.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_BENCH_CPU_ELF): user/bench_cpu.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/bench_cpu.c  -o build/user/bench_cpu.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/bench_cpu.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_BENCH_IO_ELF): user/bench_io.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/bench_io.c   -o build/user/bench_io.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/bench_io.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_BENCH_MIX_ELF): user/bench_mix.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/bench_mix.c  -o build/user/bench_mix.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/bench_mix.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(IO_TEST_BIN): scripts/gen_io_test.py
+	@mkdir -p $(dir $@)
+	python3 scripts/gen_io_test.py $(IO_TEST_BIN)
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(USER_HELLO_ELF)
 	@mkdir -p $(dir $@)
@@ -62,12 +91,12 @@ iso: $(KERNEL_ELF) disk
 	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(ISO_IMAGE) $(ISO_DIR) 2>&1 | grep -v "xorriso"
 
 # Build the MyFS disk image from all files in disk_files/
-disk:
+disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(IO_TEST_BIN)
 	@mkdir -p $(dir $(DISK_IMAGE))
 	@if [ -d $(DISK_FILES_DIR) ] && [ "$$(ls -A $(DISK_FILES_DIR) 2>/dev/null)" ]; then \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/*; \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(IO_TEST_BIN); \
 	else \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(IO_TEST_BIN); \
 	fi
 
 run: iso

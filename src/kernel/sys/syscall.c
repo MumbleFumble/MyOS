@@ -4,6 +4,7 @@
 #include "../arch/port_io.h"
 #include "../proc/sched.h"
 #include "../proc/policy_wf.h"
+#include "../proc/policy_ml.h"
 #include "../proc/elf.h"
 #include "../fs/vfs.h"
 #include "../mem/vmm.h"
@@ -240,7 +241,7 @@ static int64_t sys_telemetry(uint64_t buf_va, uint64_t max_tasks)
 }
 
 /* SYS_SETPOLICY: setpolicy(index) — swap the active scheduling policy.
- * index 0 = round-robin, 1 = weighted-fair.
+ * index 0 = round-robin, 1 = weighted-fair, 2 = learned.
  * Returns 0 on success, -1 if the index is unknown. */
 static int64_t sys_setpolicy(uint64_t index)
 {
@@ -251,9 +252,24 @@ static int64_t sys_setpolicy(uint64_t index)
     case SCHED_POLICY_WF:
         sched_set_policy(&wf_policy);
         return 0;
+    case SCHED_POLICY_ML:
+        sched_set_policy(&ml_policy);
+        return 0;
     default:
         return -1;
     }
+}
+
+/* SYS_TELEMETRY_DRAIN: telemetry_drain(buf_va, max_records)
+ * Copies up to max_records switch_record entries (oldest first) into the
+ * caller's buffer and clears the trace ring.
+ * Returns the number of records written, or -1 on bad args. */
+static int64_t sys_telemetry_drain(uint64_t buf_va, uint64_t max_records)
+{
+    if (!buf_va || max_records == 0 || max_records > 1024)
+        return -1;
+    struct switch_record *buf = (struct switch_record *)buf_va;
+    return (int64_t)sched_trace_drain(buf, (int)max_records);
 }
 
 /* -----------------------------------------------------------------------
@@ -284,6 +300,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TIME:    return sys_time(arg1);
     case SYS_TELEMETRY: return sys_telemetry(arg1, arg2);
     case SYS_SETPOLICY: return sys_setpolicy(arg1);
+    case SYS_TELEMETRY_DRAIN: return sys_telemetry_drain(arg1, arg2);
     default:          return -1;  /* ENOSYS */
     }
 }

@@ -15,10 +15,12 @@
 #define SYS_TIME      12
 #define SYS_TELEMETRY 13
 #define SYS_SETPOLICY 14
+#define SYS_TELEMETRY_DRAIN 15
 
 /* Policy indices for sys_setpolicy() */
 #define SCHED_POLICY_RR  0   /* round-robin  */
 #define SCHED_POLICY_WF  1   /* weighted-fair */
+#define SCHED_POLICY_ML  2   /* learned */
 
 /* Matches kernel rtc_time_t exactly */
 typedef struct {
@@ -45,6 +47,30 @@ typedef struct {
     unsigned long  io_block_count;
 } task_stat_t;               /* 56 bytes */
 
+
+/*
+ * Per-context-switch trace record -- mirrors kernel struct switch_record.
+ * Drained in bulk by sys_telemetry_drain().
+ */
+typedef struct {
+    unsigned int   pid;
+    unsigned char  state;     /* 0=READY 1=RUNNING 2=DEAD 3=WAITING */
+    unsigned char  _pad[3];
+    unsigned long  total_ticks;
+    unsigned long  wait_ticks;
+    unsigned long  syscall_count;
+    unsigned long  io_block_count;
+} trace_task_snapshot_t;      /* 40 bytes */
+
+typedef struct {
+    unsigned long  tick;
+    unsigned int   prev_idx;
+    unsigned int   next_idx;
+    unsigned int   task_count;
+    unsigned int   _pad;
+    trace_task_snapshot_t tasks[32];
+} switch_record_t;            /* 1304 bytes */
+
 /* File descriptors */
 #define STDIN   0
 #define STDOUT  1
@@ -65,3 +91,4 @@ long  sys_readdir(long index, char *name_buf);
 long  sys_time(sys_time_t *buf);
 long  sys_telemetry(task_stat_t *buf, long max_tasks);
 long  sys_setpolicy(long index);
+long  sys_telemetry_drain(switch_record_t *buf, long max_records);

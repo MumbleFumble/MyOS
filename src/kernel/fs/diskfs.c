@@ -42,21 +42,31 @@ static int64_t diskfs_read_op(vfs_node_t *node, uint64_t offset,
 
     uint32_t first_sect = (uint32_t)(disk_off / 512);
     uint32_t last_sect  = (uint32_t)((disk_off + len - 1) / 512);
-    uint32_t n_sects    = last_sect - first_sect + 1;
 
-    uint8_t *tmp = (uint8_t *)kmalloc(n_sects * 512);
-    if (!tmp) return -1;
-
-    if (ata_read(priv->record_lba + first_sect, n_sects, tmp) != 0) {
-        kfree(tmp);
-        return -1;
+    /* Read whole sectors straight into the caller's buffer; use a small
+     * stack bounce buffer only for partial head/tail sectors. This avoids
+     * the per-read kmalloc that used to leak the kernel heap (kfree is
+     * currently a no-op bump allocator), which failed reads past ~7 MiB. */
+    uint8_t bounce[512];
+    uint64_t done = 0;
+    for (uint32_t s = first_sect; s <= last_sect; s++) {
+        uint64_t sect_start = (uint64_t)s * 512;
+        uint64_t copy_start = disk_off > sect_start ? disk_off : sect_start;
+        uint64_t sect_end   = sect_start + 512;
+        uint64_t copy_end   = disk_off + len < sect_end ? disk_off + len : sect_end;
+        uint64_t chunk = copy_end - copy_start;
+        if (chunk == 512) {
+            if (ata_read(priv->record_lba + s, 1, buf + done) != 0)
+                return -1;
+        } else {
+            if (ata_read(priv->record_lba + s, 1, bounce) != 0)
+                return -1;
+            uint64_t b_off = copy_start - sect_start;
+            for (uint64_t i = 0; i < chunk; i++)
+                buf[done + i] = bounce[b_off + i];
+        }
+        done += chunk;
     }
-
-    uint64_t src_off = disk_off - (uint64_t)first_sect * 512;
-    for (uint64_t i = 0; i < len; i++)
-        buf[i] = tmp[src_off + i];
-
-    kfree(tmp);
     return (int64_t)len;
 }
 

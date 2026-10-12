@@ -173,3 +173,48 @@ typedef struct {
  * Returns the number of active (non-DEAD) tasks copied.
  */
 int sched_get_stats(task_stat_t *buf, int max);
+
+/* -----------------------------------------------------------------------
+ * Switch-trace telemetry -- per-context-switch records for offline ML
+ * training (Phase 1 of the research roadmap).
+ *
+ * Every real context switch appends one record capturing the tick, the
+ * previous and next task indices, and a snapshot of the full task table
+ * as the policy saw it. Userspace drains the ring with SYS_TELEMETRY_DRAIN
+ * and trains models offline on the (run-queue state -> next_task) pairs.
+ *
+ * Layout is stable; userspace mirrors it in lib/syscall.h.
+ * ----------------------------------------------------------------------- */
+
+#define TRACE_MAX_TASKS  32
+#define TRACE_RING_SIZE  256
+
+struct trace_task_snapshot {
+    uint32_t pid;
+    uint8_t  state;      /* task_state_t cast to uint8 */
+    uint8_t  _pad[3];
+    uint64_t total_ticks;
+    uint64_t wait_ticks;
+    uint64_t syscall_count;
+    uint64_t io_block_count;
+};                       /* 40 bytes */
+
+struct switch_record {
+    uint64_t tick;
+    uint32_t prev_idx;   /* task table index of outgoing task */
+    uint32_t next_idx;   /* task table index of incoming task */
+    uint32_t task_count; /* number of valid entries in tasks[] */
+    uint32_t _pad;
+    struct trace_task_snapshot tasks[TRACE_MAX_TASKS];
+};                       /* 1304 bytes */
+
+/*
+ * Drain up to 'max' records (oldest first) from the ring into 'buf'
+ * and clear the ring. Returns the number of records copied.
+ * Safe to call from syscall context; briefly disables interrupts.
+ */
+int sched_trace_drain(struct switch_record *buf, int max);
+
+/* ABI stability: userspace mirrors these layouts exactly. */
+_Static_assert(sizeof(struct trace_task_snapshot) == 40, "trace_task_snapshot layout changed");
+_Static_assert(sizeof(struct switch_record) == 1304, "switch_record layout changed");

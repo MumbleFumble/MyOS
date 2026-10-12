@@ -14,6 +14,18 @@ static uint32_t   current    = 0;   /* index of currently running task */
 static uint32_t   next_pid   = 1;
 
 /* -----------------------------------------------------------------------
+ * Switch-trace ring buffer.
+ *
+ * Written only by sched_tick() (IRQ or syscall context, allocation-free)
+ * and drained by sched_trace_drain(). When full, the oldest record is
+ * overwritten. All writes are plain stores; the drain side disables
+ * interrupts while copying.
+ * ----------------------------------------------------------------------- */
+static struct switch_record trace_ring[TRACE_RING_SIZE];
+static uint32_t trace_head  = 0;  /* index of oldest valid record */
+static uint32_t trace_count = 0;  /* number of valid records */
+
+/* -----------------------------------------------------------------------
  * Built-in round-robin policy
  * ----------------------------------------------------------------------- */
 
@@ -74,6 +86,32 @@ int sched_get_stats(task_stat_t *buf, int max)
         n++;
     }
     return n;
+}
+
+/*
+ * Drain the switch-trace ring: copy up to 'max' records (oldest first) into
+ * 'buf' and clear the ring. Returns the number of records copied.
+ *
+ * Interrupts are disabled during the copy so a timer tick cannot interleave
+ * a record write mid-copy. Called from syscall context (IF=1 on entry via
+ * the int 0x80 trap gate), so cli/sti pairing is safe here.
+ */
+int sched_trace_drain(struct switch_record *buf, int max)
+{
+    if (!buf || max <= 0)
+        return 0;
+
+    __asm__ volatile("cli");
+    uint32_t n = trace_count < (uint32_t)max ? trace_count : (uint32_t)max;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t slot = (trace_head + i) % TRACE_RING_SIZE;
+        buf[i] = trace_ring[slot];
+    }
+    trace_head   = (trace_head + n) % TRACE_RING_SIZE;
+    trace_count -= n;
+    __asm__ volatile("sti");
+
+    return (int)n;
 }
 
 /* Forward declaration */
@@ -152,10 +190,14 @@ void sched_current_exit(void)
 
     /* Wake any task waiting for this pid */
     uint32_t dead_pid = tasks[current].pid;
+    uint64_t now = (uint64_t)timer_ticks();
     for (uint32_t i = 0; i < task_count; i++) {
         if (tasks[i].state == TASK_WAITING &&
             (tasks[i].wait_pid == 0 || tasks[i].wait_pid == dead_pid))
         {
+            /* Accumulate the time this task spent blocked. wait_start_tick
+             * was recorded when the task entered TASK_WAITING. */
+            tasks[i].wait_ticks += now - tasks[i].wait_start_tick;
             tasks[i].state = TASK_READY;
         }
     }
@@ -206,6 +248,44 @@ check:
     goto check;
 }
 
+/*
+ * Record one context switch into the trace ring.
+ *
+ * Called from sched_tick() immediately after the policy picks 'next', so the
+ * snapshot reflects exactly what the policy observed when deciding. Runs in
+ * IRQ or syscall context: no allocation, no blocking, plain stores only.
+ */
+static void trace_record_switch(uint64_t tick, uint32_t old, uint32_t next)
+{
+    uint32_t slot;
+    if (trace_count < TRACE_RING_SIZE) {
+        slot = (trace_head + trace_count) % TRACE_RING_SIZE;
+        trace_count++;
+    } else {
+        /* Ring full: overwrite the oldest record. */
+        slot = trace_head;
+        trace_head = (trace_head + 1) % TRACE_RING_SIZE;
+    }
+
+    struct switch_record *r = &trace_ring[slot];
+    r->tick        = tick;
+    r->prev_idx    = old;
+    r->next_idx    = next;
+    r->task_count  = task_count < TRACE_MAX_TASKS ? task_count : TRACE_MAX_TASKS;
+    r->_pad        = 0;
+    for (uint32_t i = 0; i < r->task_count; i++) {
+        r->tasks[i].pid           = tasks[i].pid;
+        r->tasks[i].state         = (uint8_t)tasks[i].state;
+        r->tasks[i]._pad[0]       = 0;
+        r->tasks[i]._pad[1]       = 0;
+        r->tasks[i]._pad[2]       = 0;
+        r->tasks[i].total_ticks   = tasks[i].total_ticks;
+        r->tasks[i].wait_ticks    = tasks[i].wait_ticks;
+        r->tasks[i].syscall_count = tasks[i].syscall_count;
+        r->tasks[i].io_block_count = tasks[i].io_block_count;
+    }
+}
+
 void sched_tick(uint64_t tick)
 {
     if (task_count <= 1)
@@ -214,12 +294,19 @@ void sched_tick(uint64_t tick)
     uint32_t old  = current;
     uint32_t next = active_policy->pick_next(current, tasks, task_count, tick);
 
+    /* Accumulate runtime for the outgoing task on every tick, even when
+     * the policy keeps the current task (next == old). Otherwise a
+     * never-preempted task would show zero total_ticks. */
+    if (tasks[old].last_scheduled_tick <= tick) {
+        tasks[old].total_ticks += tick - tasks[old].last_scheduled_tick;
+        tasks[old].last_scheduled_tick = tick;
+    }
+
     if (next == old)
         return; /* nothing else to run */
 
-    /* Accumulate runtime for the outgoing task. */
-    if (tasks[old].last_scheduled_tick <= tick)
-        tasks[old].total_ticks += tick - tasks[old].last_scheduled_tick;
+    /* Capture the decision and the run-queue state the policy observed. */
+    trace_record_switch(tick, old, next);
 
     /* Only mark old task READY if it hasn't already exited.
      * sched_current_exit() marks the task DEAD before calling sched_tick();

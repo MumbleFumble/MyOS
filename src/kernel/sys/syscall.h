@@ -17,10 +17,12 @@
 #define SYS_TIME      12  /* time(rtc_time_t *buf)       -> 0          */
 #define SYS_TELEMETRY 13  /* telemetry(buf, max_tasks)   -> task count */
 #define SYS_SETPOLICY 14  /* setpolicy(index)            -> 0 or -1   */
+#define SYS_TELEMETRY_DRAIN 15  /* telemetry_drain(buf, max) -> records  */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */
 #define SCHED_POLICY_WF  1   /* weighted-fair           */
+#define SCHED_POLICY_ML  2   /* learned (linear model)  */
 
 /* fd values */
 #define FD_STDIN    0
