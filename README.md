@@ -253,6 +253,8 @@ installs the gate (`idt_set_gate(14, pf_stub, 0x08, 0x8E)`). Shell command
 `cr2=0x0000050000000000 err=0x0000000000000006 (not-present write user)`
 (2/2 QEMU runs passing).
 
+**Increment 2 (done, Oct 12 2026) -- demand paging:** the #PF handler now demand-maps a 16-page user region at 0x20000000000 (2TB, clear of user ELFs, the user stack, and the inc.1 probe address). On a not-present ring-3 fault inside the region it allocates a zeroed PMM frame, maps it into the *faulting* address space (the interrupt does not switch CR3) with PRESENT|RW|USER, prints `[pf] demand-mapped page ...`, and returns -- pf_stub's iretq re-executes the faulting instruction, which now succeeds. Faults outside the region (or protection/supervisor faults) still halt, unchanged from increment 1. `user/demand_test.c` writes a distinct pattern to 4 pages (one #PF each) and verifies the data back; `scripts/test_demand.sh` checks for exactly 4 demand-map lines, the expected page addresses, `[demand] PASS`, and no halt. Verified 1/1 QEMU run; `scripts/test_pf.sh` still passes (out-of-region fault halts with identical output).
+
 ---
 
 ### Phase 3 — AI-Assisted I/O Scheduling
