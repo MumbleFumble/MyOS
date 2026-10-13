@@ -27,3 +27,33 @@ struct pf_record {
 
 /* Drain up to max records (oldest first). Returns count copied. */
 int pf_trace_drain(struct pf_record *buf, int max);
+
+/* -----------------------------------------------------------------------
+ * Page replacement policy interface (Phase 2, increment 4).
+ *
+ * The demand region is limited to DEMAND_QUOTA frames. When a fault
+ * needs a frame and none is free, the active policy picks a victim
+ * frame to evict (unmap and reuse).
+ * ----------------------------------------------------------------------- */
+#define DEMAND_QUOTA 4
+
+struct demand_frame {
+    uint64_t virt;   /* page-aligned VA, 0 = slot free */
+    uint64_t phys;   /* backing frame */
+    uint64_t seq;    /* allocation sequence number (FIFO order) */
+    uint64_t cr3;    /* owning address space */
+};
+
+/* Returns victim frame index in [0, n), or -1 if none. */
+typedef int (*pf_evict_fn)(struct demand_frame *frames, int n);
+
+struct pf_policy {
+    const char *name;
+    pf_evict_fn pick_victim;
+};
+
+/* Baseline policies. */
+extern struct pf_policy pf_policy_fifo;
+
+/* Select the active eviction policy (default: FIFO). */
+void pf_set_policy(struct pf_policy *p);

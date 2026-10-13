@@ -23,6 +23,21 @@ extern void pf_stub(void);
 #define DEMAND_BASE  0x20000000000UL
 #define DEMAND_PAGES 16UL
 
+/* Frame table for the demand region (Phase 2, increment 4).
+ * The region may hold at most DEMAND_QUOTA frames; a fault needing
+ * a fifth frame evicts a victim chosen by the active policy.
+ * NOTE: the table is global, so two tasks sharing the demand region
+ * would share the quota. Fine for now; per-task quotas are future work. */
+static struct demand_frame demand_frames[DEMAND_QUOTA];
+static uint64_t demand_seq = 0;
+static struct pf_policy *active_pf_policy = &pf_policy_fifo;
+
+void pf_set_policy(struct pf_policy *p)
+{
+    if (p && p->pick_victim)
+        active_pf_policy = p;
+}
+
 /* COM1 was initialised by kernel_main's serial_init(); reuse the port. */
 static void exc_putchar(char c)
 {
@@ -149,15 +164,46 @@ void page_fault_handler(uint64_t err_code)
                     (page < DEMAND_BASE + DEMAND_PAGES * PAGE_SIZE);
 
     if (not_present && user_mode && in_region) {
-        uint64_t cr3   = vmm_current_cr3();
-        uint64_t frame = pmm_alloc_page();
-        if (!frame) {
-            exc_puts("[pf] demand-map OOM - halting\r\n");
-            goto halt;
+        uint64_t cr3 = vmm_current_cr3();
+
+        /* Find a free frame-table slot. */
+        int slot = -1;
+        for (int i = 0; i < DEMAND_QUOTA; i++) {
+            if (demand_frames[i].virt == 0) { slot = i; break; }
         }
+
+        uint64_t frame;
+        if (slot < 0) {
+            /* Quota exhausted: ask the policy for a victim. */
+            int victim = active_pf_policy->pick_victim(demand_frames,
+                                                       DEMAND_QUOTA);
+            if (victim < 0) {
+                exc_puts("[pf] eviction policy found no victim - halting\r\n");
+                goto halt;
+            }
+            /* Victim belongs to the faulting address space (see note
+             * on the global table); unmap it here. */
+            exc_puts("[pf] evicting page ");
+            exc_puthex64(demand_frames[victim].virt);
+            exc_puts("\r\n");
+            vmm_unmap_page(demand_frames[victim].virt);
+            frame = demand_frames[victim].phys;  /* reuse the frame */
+            slot = victim;
+        } else {
+            frame = pmm_alloc_page();
+            if (!frame) {
+                exc_puts("[pf] demand-map OOM - halting\r\n");
+                goto halt;
+            }
+        }
+
         zero_frame(frame);
         vmm_map_page_in(cr3, frame, page,
                         PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        demand_frames[slot].virt = page;
+        demand_frames[slot].phys = frame;
+        demand_frames[slot].seq  = demand_seq++;
+        demand_frames[slot].cr3  = cr3;
         exc_puts("[pf] demand-mapped page ");
         exc_puthex64(page);
         exc_puts(" <- frame ");

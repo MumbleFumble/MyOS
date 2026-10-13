@@ -24,6 +24,7 @@ USER_BENCH_CPU_ELF := build/user/bench_cpu.elf
 USER_BENCH_IO_ELF  := build/user/bench_io.elf
 USER_BENCH_MIX_ELF := build/user/bench_mix.elf
 USER_DEMAND_ELF    := build/user/demand_test.elf
+USER_EVICT_ELF     := build/user/evict_test.elf
 IO_TEST_BIN        := build/io_test.bin
 
 SRC_DIR    := src
@@ -74,6 +75,13 @@ $(USER_DEMAND_ELF): user/demand_test.c src/lib/syscall.S src/lib/malloc.c user/u
 	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c   -o build/user/malloc_u.o
 	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/demand_test.o build/user/syscall_u.o build/user/malloc_u.o
 
+$(USER_EVICT_ELF): user/evict_test.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/evict_test.c  -o build/user/evict_test.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c   -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/evict_test.o build/user/syscall_u.o build/user/malloc_u.o
+
 $(IO_TEST_BIN): scripts/gen_io_test.py
 	@mkdir -p $(dir $@)
 	python3 scripts/gen_io_test.py $(IO_TEST_BIN)
@@ -99,12 +107,12 @@ iso: $(KERNEL_ELF) disk
 	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(ISO_IMAGE) $(ISO_DIR) 2>&1 | grep -v "xorriso"
 
 # Build the MyFS disk image from all files in disk_files/
-disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(IO_TEST_BIN)
+disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(IO_TEST_BIN)
 	@mkdir -p $(dir $(DISK_IMAGE))
 	@if [ -d $(DISK_FILES_DIR) ] && [ "$$(ls -A $(DISK_FILES_DIR) 2>/dev/null)" ]; then \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(IO_TEST_BIN); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(IO_TEST_BIN); \
 	else \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(IO_TEST_BIN); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(IO_TEST_BIN); \
 	fi
 
 run: iso

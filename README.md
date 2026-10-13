@@ -257,6 +257,8 @@ installs the gate (`idt_set_gate(14, pf_stub, 0x08, 0x8E)`). Shell command
 
 **Increment 3 (done, Oct 12 2026) -- fault telemetry:** every #PF is recorded in a 256-entry kernel ring (`struct pf_record`: tick, CR2, error code, faulting pid, resolved flag; 32 bytes each) before the handler decides to demand-map or halt. New `SYS_PF_DRAIN` syscall (16) drains records to userspace; shell `pftrace` command prints them (`[i] tick=... cr2=0x... err=... pid=... resolved=...`). `scripts/test_pftrace.sh` runs demand_test then checks pftrace shows 4 records, all resolved=1, with the expected CR2 addresses and non-zero pids. This is the event stream a learned eviction policy will train on.
 
+**Increment 4 (done, Oct 12 2026) -- eviction policy interface + FIFO baseline:** the demand region now has a 4-frame quota tracked in a kernel frame table (`struct demand_frame`: virt, phys, sequence, owning CR3). When a fault needs a frame and the quota is exhausted, the active `struct pf_policy` picks a victim via `pick_victim()`; the victim is unmapped (`vmm_unmap_page` + TLB invalidate) and its frame reused. The baseline `pf_policy_fifo` evicts the longest-resident frame. `user/evict_test.c` touches all 16 pages sequentially (16 faults, 12 evictions) then re-touches page 0 (1 more fault + eviction); `scripts/test_evict.sh` verifies 17 demand-maps, 13 evictions in FIFO order, and no halt. All earlier tests (pf, demand, pftrace) still pass.
+
 ---
 
 ### Phase 3 — AI-Assisted I/O Scheduling
