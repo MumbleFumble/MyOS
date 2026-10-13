@@ -259,6 +259,8 @@ installs the gate (`idt_set_gate(14, pf_stub, 0x08, 0x8E)`). Shell command
 
 **Increment 4 (done, Oct 12 2026) -- eviction policy interface + FIFO baseline:** the demand region now has a 4-frame quota tracked in a kernel frame table (`struct demand_frame`: virt, phys, sequence, owning CR3). When a fault needs a frame and the quota is exhausted, the active `struct pf_policy` picks a victim via `pick_victim()`; the victim is unmapped (`vmm_unmap_page` + TLB invalidate) and its frame reused. The baseline `pf_policy_fifo` evicts the longest-resident frame. `user/evict_test.c` touches all 16 pages sequentially (16 faults, 12 evictions) then re-touches page 0 (1 more fault + eviction); `scripts/test_evict.sh` verifies 17 demand-maps, 13 evictions in FIFO order, and no halt. All earlier tests (pf, demand, pftrace) still pass.
 
+**Increment 5 (done, Oct 12 2026) -- learned eviction policy:** `user/bench_pf.c` generates a deterministic 236-access pattern (sequential scans, hot loop, 80/20 hot/cold via LCG). `scripts/sim_pf_search.py` replays it through a 4-frame simulator, learning linear weights via random search + hill climb: 104 faults vs FIFO 188 (-45%), OPT 88; held-out pattern 100 vs FIFO 179. The model scores each frame as `w_age*age + w_freq*freq` (both weights negative: keep hot pages, evict young pages MRU-style for scans). `src/kernel/arch/policy_pf_learned.c` implements it in fixed-point 2^20, selectable via `pfpolicy 1` (new SYS_PF_SETPOLICY syscall 17). QEMU evaluation: learned achieves 104 faults, exactly matching the simulator, beating FIFO's 120.
+
 ---
 
 ### Phase 3 — AI-Assisted I/O Scheduling

@@ -268,6 +268,15 @@ void _start(long argc, char **argv)
         }
         if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
 
+        if (streq(cmd, "pfpolicy")) {
+            long pi = -1;
+            if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
+            if (pi != 0 && pi != 1) { puts_u("usage: pfpolicy <0|1>  (0=fifo  1=learned)\r\n> "); continue; }
+            long r = sys_pf_setpolicy(pi);
+            if (r < 0) puts_u("pfpolicy: unknown index\r\n> ");
+            else { puts_u("pf policy set to "); puts_u(pi ? "learned\r\n> " : "fifo\r\n> "); }
+            continue;
+        }
         if (streq(cmd, "policy")) {
             if (!arg[0]) {
                 puts_u("usage: policy <0|1|2>  (0=round-robin  1=weighted-fair  2=learned)\r\n> ");
@@ -328,7 +337,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

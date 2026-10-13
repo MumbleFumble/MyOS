@@ -42,6 +42,8 @@ struct demand_frame {
     uint64_t phys;   /* backing frame */
     uint64_t seq;    /* allocation sequence number (FIFO order) */
     uint64_t cr3;    /* owning address space */
+    uint32_t freq;   /* faults for this page (learned policy feature) */
+    uint32_t _pad;
 };
 
 /* Returns victim frame index in [0, n), or -1 if none. */
@@ -54,6 +56,8 @@ struct pf_policy {
 
 /* Baseline policies. */
 extern struct pf_policy pf_policy_fifo;
+extern struct pf_policy pf_policy_learned;
 
 /* Select the active eviction policy (default: FIFO). */
 void pf_set_policy(struct pf_policy *p);
+uint64_t pf_current_seq(void);

@@ -107,6 +107,13 @@ sys_pf_drain:
     int  0x80
     ret
 
+/* long sys_pf_setpolicy(long index) */
+.global sys_pf_setpolicy
+sys_pf_setpolicy:
+    mov  rax, 17        /* SYS_PF_SETPOLICY */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:

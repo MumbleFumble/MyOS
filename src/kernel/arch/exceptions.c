@@ -30,12 +30,18 @@ extern void pf_stub(void);
  * would share the quota. Fine for now; per-task quotas are future work. */
 static struct demand_frame demand_frames[DEMAND_QUOTA];
 static uint64_t demand_seq = 0;
+static uint32_t page_fault_count[16];  /* indexed by page in demand region */
 static struct pf_policy *active_pf_policy = &pf_policy_fifo;
 
 void pf_set_policy(struct pf_policy *p)
 {
     if (p && p->pick_victim)
         active_pf_policy = p;
+}
+
+uint64_t pf_current_seq(void)
+{
+    return demand_seq;
 }
 
 /* COM1 was initialised by kernel_main's serial_init(); reuse the port. */
@@ -200,10 +206,13 @@ void page_fault_handler(uint64_t err_code)
         zero_frame(frame);
         vmm_map_page_in(cr3, frame, page,
                         PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        uint32_t pidx = (uint32_t)((page - DEMAND_BASE) / PAGE_SIZE);
+        uint32_t freq = ++page_fault_count[pidx];
         demand_frames[slot].virt = page;
         demand_frames[slot].phys = frame;
         demand_frames[slot].seq  = demand_seq++;
         demand_frames[slot].cr3  = cr3;
+        demand_frames[slot].freq = freq;
         exc_puts("[pf] demand-mapped page ");
         exc_puthex64(page);
         exc_puts(" <- frame ");

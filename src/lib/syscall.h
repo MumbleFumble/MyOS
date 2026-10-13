@@ -17,6 +17,7 @@
 #define SYS_SETPOLICY 14
 #define SYS_TELEMETRY_DRAIN 15
 #define SYS_PF_DRAIN 16
+#define SYS_PF_SETPOLICY 17
 
 /* Policy indices for sys_setpolicy() */
 #define SCHED_POLICY_RR  0   /* round-robin  */
@@ -104,3 +105,5 @@ typedef struct {
 } pf_record_t;               /* 32 bytes */
 
 long sys_pf_drain(pf_record_t *buf, long max_records);
+
+long sys_pf_setpolicy(long index);

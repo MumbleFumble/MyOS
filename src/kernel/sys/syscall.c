@@ -285,6 +285,15 @@ static int64_t sys_pf_drain(uint64_t buf_va, uint64_t max_records)
     return (int64_t)pf_trace_drain(buf, (int)max_records);
 }
 
+/* SYS_PF_SETPOLICY: pf_setpolicy(index) -> 0 or -1.
+ * Index 0 = FIFO, 1 = learned. */
+static int64_t sys_pf_setpolicy(uint64_t index)
+{
+    if (index == 0) { pf_set_policy(&pf_policy_fifo); return 0; }
+    if (index == 1) { pf_set_policy(&pf_policy_learned); return 0; }
+    return -1;
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -315,6 +324,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_SETPOLICY: return sys_setpolicy(arg1);
     case SYS_TELEMETRY_DRAIN: return sys_telemetry_drain(arg1, arg2);
     case SYS_PF_DRAIN: return sys_pf_drain(arg1, arg2);
+    case SYS_PF_SETPOLICY: return sys_pf_setpolicy(arg1);
 default:          return -1;  /* ENOSYS */
     }
 }
