@@ -255,6 +255,8 @@ installs the gate (`idt_set_gate(14, pf_stub, 0x08, 0x8E)`). Shell command
 
 **Increment 2 (done, Oct 12 2026) -- demand paging:** the #PF handler now demand-maps a 16-page user region at 0x20000000000 (2TB, clear of user ELFs, the user stack, and the inc.1 probe address). On a not-present ring-3 fault inside the region it allocates a zeroed PMM frame, maps it into the *faulting* address space (the interrupt does not switch CR3) with PRESENT|RW|USER, prints `[pf] demand-mapped page ...`, and returns -- pf_stub's iretq re-executes the faulting instruction, which now succeeds. Faults outside the region (or protection/supervisor faults) still halt, unchanged from increment 1. `user/demand_test.c` writes a distinct pattern to 4 pages (one #PF each) and verifies the data back; `scripts/test_demand.sh` checks for exactly 4 demand-map lines, the expected page addresses, `[demand] PASS`, and no halt. Verified 1/1 QEMU run; `scripts/test_pf.sh` still passes (out-of-region fault halts with identical output).
 
+**Increment 3 (done, Oct 12 2026) -- fault telemetry:** every #PF is recorded in a 256-entry kernel ring (`struct pf_record`: tick, CR2, error code, faulting pid, resolved flag; 32 bytes each) before the handler decides to demand-map or halt. New `SYS_PF_DRAIN` syscall (16) drains records to userspace; shell `pftrace` command prints them (`[i] tick=... cr2=0x... err=... pid=... resolved=...`). `scripts/test_pftrace.sh` runs demand_test then checks pftrace shows 4 records, all resolved=1, with the expected CR2 addresses and non-zero pids. This is the event stream a learned eviction policy will train on.
+
 ---
 
 ### Phase 3 — AI-Assisted I/O Scheduling

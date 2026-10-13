@@ -137,6 +137,7 @@ static void cmd_memtest(void)
 /* Static drain buffer: 8 records x 1304 bytes = ~10.2 KiB (static, not stack).
  * The kernel ring holds 256 records, so cmd_trace drains in a loop. */
 static switch_record_t trace_buf[8];
+static pf_record_t pf_buf[8];
 
 static void cmd_trace(void)
 {
@@ -160,6 +161,38 @@ static void cmd_trace(void)
         total += n;
     }
     puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" switch records\r\n");
+}
+
+/* Page-fault telemetry: drains the kernel pf ring and prints records. */
+static void cmd_pftrace(void)
+{
+    char buf[24];
+    char hex[19];
+    long total = 0;
+    for (long iter = 0; iter < 32; iter++) {
+        long n = sys_pf_drain(pf_buf, 8);
+        if (n < 0) { puts_u("pftrace: drain failed\r\n"); return; }
+        if (n == 0) break;
+        for (long i = 0; i < n; i++) {
+            pf_record_t *r = &pf_buf[i];
+            puts_u("["); puts_u(itoa(total + i, buf)); puts_u("] tick=");
+            puts_u(itoa((long)r->tick, buf));
+            puts_u(" cr2=0x");
+            unsigned long v = (unsigned long)r->cr2;
+            for (int h = 0; h < 16; h++) {
+                int nib = (v >> (60 - h*4)) & 0xF;
+                hex[h] = nib < 10 ? '0'+nib : 'a'+nib-10;
+            }
+            hex[16] = '\0';
+            puts_u(hex);
+            puts_u(" err="); puts_u(itoa((long)r->err_code, buf));
+            puts_u(" pid="); puts_u(itoa((long)r->pid, buf));
+            puts_u(" resolved="); puts_u(itoa((long)r->resolved, buf));
+            puts_u("\r\n");
+        }
+        total += n;
+    }
+    puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" fault records\r\n");
 }
 
 /* Machine-readable full trace dump for offline ML training data.
@@ -233,6 +266,7 @@ void _start(long argc, char **argv)
             else cmd_trace();
             puts_u("> "); continue;
         }
+        if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
 
         if (streq(cmd, "policy")) {
             if (!arg[0]) {
@@ -294,7 +328,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

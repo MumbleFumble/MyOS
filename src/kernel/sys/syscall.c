@@ -5,6 +5,7 @@
 #include "../proc/sched.h"
 #include "../proc/policy_wf.h"
 #include "../proc/policy_ml.h"
+#include "../arch/exceptions.h"
 #include "../proc/elf.h"
 #include "../fs/vfs.h"
 #include "../mem/vmm.h"
@@ -272,6 +273,18 @@ static int64_t sys_telemetry_drain(uint64_t buf_va, uint64_t max_records)
     return (int64_t)sched_trace_drain(buf, (int)max_records);
 }
 
+/* SYS_PF_DRAIN: pf_drain(buf_va, max_records)
+ * Copies up to max_records pf_record entries (oldest first) into the
+ * caller's buffer and clears the fault trace ring.
+ * Returns the number of records written, or -1 on bad args. */
+static int64_t sys_pf_drain(uint64_t buf_va, uint64_t max_records)
+{
+    if (!buf_va || max_records == 0 || max_records > 1024)
+        return -1;
+    struct pf_record *buf = (struct pf_record *)buf_va;
+    return (int64_t)pf_trace_drain(buf, (int)max_records);
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -301,7 +314,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TELEMETRY: return sys_telemetry(arg1, arg2);
     case SYS_SETPOLICY: return sys_setpolicy(arg1);
     case SYS_TELEMETRY_DRAIN: return sys_telemetry_drain(arg1, arg2);
-    default:          return -1;  /* ENOSYS */
+    case SYS_PF_DRAIN: return sys_pf_drain(arg1, arg2);
+default:          return -1;  /* ENOSYS */
     }
 }
 

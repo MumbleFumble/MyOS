@@ -4,6 +4,8 @@
 #include "port_io.h"
 #include "../mem/vmm.h"
 #include "../mem/pmm.h"
+#include "timer.h"
+#include "../proc/sched.h"
 
 extern void pf_stub(void);
 
@@ -62,10 +64,71 @@ static void zero_frame(uint64_t phys)
  * (protection fault, supervisor fault, address outside the demand
  * region) still halts, exactly as in increment 1.
  */
+/* -----------------------------------------------------------------------
+ * Fault telemetry ring (Phase 2, increment 3).
+ *
+ * Records every #PF: tick, CR2, error code, faulting pid, and whether
+ * the handler resolved it via demand-mapping. Drained by SYS_PF_DRAIN.
+ * ----------------------------------------------------------------------- */
+static struct pf_record pf_ring[PF_TRACE_RING_SIZE];
+static uint32_t pf_head  = 0;   /* index of oldest record */
+static uint32_t pf_count = 0;   /* number of valid records */
+
+static void pf_trace_record(uint64_t cr2, uint64_t err_code, int resolved)
+{
+    uint32_t pid = 0;
+    if (err_code & 0x4) {  /* user-mode fault: attribute to current task */
+        struct task *t = sched_current_task();
+        if (t) pid = t->pid;
+    }
+
+    __asm__ volatile("cli");
+    uint32_t slot;
+    if (pf_count < PF_TRACE_RING_SIZE) {
+        slot = (pf_head + pf_count) % PF_TRACE_RING_SIZE;
+        pf_count++;
+    } else {
+        /* Ring full: overwrite oldest. */
+        slot = pf_head;
+        pf_head = (pf_head + 1) % PF_TRACE_RING_SIZE;
+    }
+    pf_ring[slot].tick      = (uint64_t)timer_ticks();
+    pf_ring[slot].cr2       = cr2;
+    pf_ring[slot].err_code  = err_code;
+    pf_ring[slot].pid       = pid;
+    pf_ring[slot].resolved  = (uint32_t)resolved;
+    __asm__ volatile("sti");
+}
+
+int pf_trace_drain(struct pf_record *buf, int max)
+{
+    if (!buf || max <= 0)
+        return 0;
+
+    __asm__ volatile("cli");
+    uint32_t n = pf_count < (uint32_t)max ? pf_count : (uint32_t)max;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t slot = (pf_head + i) % PF_TRACE_RING_SIZE;
+        buf[i] = pf_ring[slot];
+    }
+    pf_head   = (pf_head + n) % PF_TRACE_RING_SIZE;
+    pf_count -= n;
+    __asm__ volatile("sti");
+
+    return (int)n;
+}
+
 void page_fault_handler(uint64_t err_code)
 {
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+
+    /* Telemetry: record before deciding. Resolved iff we will demand-map. */
+    uint64_t page0 = cr2 & ~(PAGE_SIZE - 1);
+    int will_resolve = (!(err_code & 0x1)) && (err_code & 0x4) &&
+                     (page0 >= DEMAND_BASE) &&
+                     (page0 < DEMAND_BASE + DEMAND_PAGES * PAGE_SIZE);
+    pf_trace_record(cr2, err_code, will_resolve);
 
     exc_puts("\r\n[pf] PAGE FAULT cr2=");
     exc_puthex64(cr2);

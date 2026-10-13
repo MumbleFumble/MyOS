@@ -100,6 +100,13 @@ sys_telemetry_drain:
     int  0x80
     ret
 
+/* long sys_pf_drain(pf_record_t *buf, long max_records) */
+.global sys_pf_drain
+sys_pf_drain:
+    mov  rax, 16        /* SYS_PF_DRAIN */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:

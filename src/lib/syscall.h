@@ -16,6 +16,7 @@
 #define SYS_TELEMETRY 13
 #define SYS_SETPOLICY 14
 #define SYS_TELEMETRY_DRAIN 15
+#define SYS_PF_DRAIN 16
 
 /* Policy indices for sys_setpolicy() */
 #define SCHED_POLICY_RR  0   /* round-robin  */
@@ -92,3 +93,14 @@ long  sys_time(sys_time_t *buf);
 long  sys_telemetry(task_stat_t *buf, long max_tasks);
 long  sys_setpolicy(long index);
 long  sys_telemetry_drain(switch_record_t *buf, long max_records);
+
+/* Page-fault record -- mirrors kernel struct pf_record exactly. */
+typedef struct {
+    unsigned long  tick;
+    unsigned long  cr2;
+    unsigned long  err_code;
+    unsigned int   pid;
+    unsigned int   resolved;
+} pf_record_t;               /* 32 bytes */
+
+long sys_pf_drain(pf_record_t *buf, long max_records);
