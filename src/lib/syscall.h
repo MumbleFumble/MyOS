@@ -20,6 +20,7 @@
 #define SYS_PF_SETPOLICY 17
 #define SYS_IO_DRAIN 18
 #define SYS_BCACHE_STAT 19
+#define SYS_PREFETCH_POLICY 20
 
 /* Policy indices for sys_setpolicy() */
 #define SCHED_POLICY_RR  0   /* round-robin  */
@@ -122,3 +123,4 @@ typedef struct {
 
 long sys_io_drain(io_record_t *buf, long max_records);
 long sys_bcache_stat(unsigned long *hits, unsigned long *misses);
+long sys_prefetch_policy(long index);

@@ -15,6 +15,7 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/ata.h"
 #include "../fs/bcache.h"
+#include "../fs/prefetch.h"
 #include "../drivers/rtc.h"
 
 /* -----------------------------------------------------------------------
@@ -319,6 +320,16 @@ static int64_t sys_bcache_stat(uint64_t hits_va, uint64_t misses_va)
     return 0;
 }
 
+/* SYS_PREFETCH_POLICY: prefetch_policy(index) -> 0 or -1.
+ * Index 0 = none, 1 = sequential, 2 = stride. */
+static int64_t sys_prefetch_policy(uint64_t index)
+{
+    if (index == 0) { prefetch_set_policy(&prefetch_none); return 0; }
+    if (index == 1) { prefetch_set_policy(&prefetch_sequential); return 0; }
+    if (index == 2) { prefetch_set_policy(&prefetch_stride); return 0; }
+    return -1;
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -352,6 +363,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_PF_SETPOLICY: return sys_pf_setpolicy(arg1);
     case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
     case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2);
+    case SYS_PREFETCH_POLICY: return sys_prefetch_policy(arg1);
 default:          return -1;  /* ENOSYS */
     }
 }

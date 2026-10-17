@@ -128,6 +128,13 @@ sys_bcache_stat:
     int  0x80
     ret
 
+/* long sys_prefetch_policy(long index) */
+.global sys_prefetch_policy
+sys_prefetch_policy:
+    mov  rax, 20        /* SYS_PREFETCH_POLICY */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:

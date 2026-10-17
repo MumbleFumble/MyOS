@@ -313,6 +313,14 @@ void _start(long argc, char **argv)
         if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
         if (streq(cmd, "iotrace")) { cmd_iotrace(); puts_u("> "); continue; }
         if (streq(cmd, "bcachestat")) { cmd_bcachestat(); puts_u("> "); continue; }
+        if (streq(cmd, "prefetch")) {
+            long pi = -1;
+            if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
+            if (pi < 0 || pi > 2) { puts_u("usage: prefetch <0|1|2>  (0=none 1=seq 2=stride)\r\n> "); continue; }
+            long r = sys_prefetch_policy(pi);
+            puts_u(r == 0 ? "prefetch policy set\r\n> " : "prefetch: failed\r\n> ");
+            continue;
+        }
 
         if (streq(cmd, "pfpolicy")) {
             long pi = -1;
@@ -383,7 +391,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, bcachestat, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, bcachestat, prefetch <0|1|2>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

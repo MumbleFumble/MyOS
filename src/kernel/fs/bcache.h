@@ -31,6 +31,14 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data);
 /* Invalidate all entries (e.g., on unmount). */
 void bcache_invalidate(void);
 
+/* Prefetch one block: read from disk and insert as prefetched.
+ * No-op if already cached. Used by prefetch policies. */
+void bcache_prefetch(uint32_t lba);
+
+/* Pollution stats: demand misses that would have hit without prefetching
+ * (measured via shadow cache). */
+uint64_t bcache_pollution_misses(void);
+
 /* Hit/miss statistics. */
 uint64_t bcache_hits(void);
 uint64_t bcache_misses(void);
