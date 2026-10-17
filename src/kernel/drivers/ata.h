@@ -19,11 +19,11 @@ int ata_detect(void);
 #define IO_TRACE_RING_SIZE 256
 
 struct io_record {
-    uint64_t tick_start;  /* timer tick when request started */
-    uint64_t tick_end;    /* timer tick when request completed */
+    uint64_t tsc_start;   /* TSC when request started */
+    uint64_t tsc_end;     /* TSC when request completed */
     uint32_t lba;         /* starting LBA */
     uint32_t count;       /* sector count */
-    uint32_t latency;     /* tick_end - tick_start */
+    uint32_t latency_us;  /* (tsc_end - tsc_start) in microseconds */
     int32_t  result;      /* 0 = success, -1 = error */
 };                        /* 32 bytes */
 

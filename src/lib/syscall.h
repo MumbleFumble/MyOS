@@ -111,11 +111,11 @@ long sys_pf_setpolicy(long index);
 
 /* I/O record -- mirrors kernel struct io_record exactly. */
 typedef struct {
-    unsigned long  tick_start;
-    unsigned long  tick_end;
+    unsigned long  tsc_start;
+    unsigned long  tsc_end;
     unsigned int   lba;
     unsigned int   count;
-    unsigned int   latency;
+    unsigned int   latency_us;
     int            result;
 } io_record_t;               /* 32 bytes */
 

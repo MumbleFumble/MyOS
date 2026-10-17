@@ -210,10 +210,8 @@ static void cmd_iotrace(void)
             puts_u("["); puts_u(itoa(total + i, buf)); puts_u("] ");
             puts_u("lba="); puts_u(itoa((long)r->lba, buf));
             puts_u(" count="); puts_u(itoa((long)r->count, buf));
-            puts_u(" lat="); puts_u(itoa((long)r->latency, buf));
-            puts_u("ticks start="); puts_u(itoa((long)r->tick_start, buf));
-            puts_u(" end="); puts_u(itoa((long)r->tick_end, buf));
-            puts_u(" result="); puts_u(itoa((long)r->result, buf));
+            puts_u(" lat="); puts_u(itoa((long)r->latency_us, buf));
+            puts_u("us result="); puts_u(itoa((long)r->result, buf));
             puts_u("\r\n");
         }
         total += n;

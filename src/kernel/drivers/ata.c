@@ -64,17 +64,17 @@ int ata_detect(void)
 
 /* Forward declaration: defined below ata_read(). */
 static void io_trace_record(uint32_t lba, uint32_t count,
-                            uint32_t tick_start, uint32_t tick_end,
+                            uint64_t tsc_start, uint64_t tsc_end,
                             int result);
 static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf);
 
 int ata_read(uint32_t lba, uint32_t count, uint8_t *buf)
 {
-    uint32_t tick_start = timer_ticks();
+    uint64_t tsc_start = timer_tsc();
     int result = ata_read_inner(lba, count, buf);
-    uint32_t tick_end = timer_ticks();
+    uint64_t tsc_end = timer_tsc();
 
-    io_trace_record(lba, count, tick_start, tick_end, result);
+    io_trace_record(lba, count, tsc_start, tsc_end, result);
     return result;
 }
 
@@ -89,9 +89,11 @@ static uint32_t io_head  = 0;   /* index of oldest record */
 static uint32_t io_count = 0;   /* number of valid records */
 
 static void io_trace_record(uint32_t lba, uint32_t count,
-                            uint32_t tick_start, uint32_t tick_end,
+                            uint64_t tsc_start, uint64_t tsc_end,
                             int result)
 {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
     __asm__ volatile("cli");
     uint32_t slot;
     if (io_count < IO_TRACE_RING_SIZE) {
@@ -102,13 +104,15 @@ static void io_trace_record(uint32_t lba, uint32_t count,
         slot = io_head;
         io_head = (io_head + 1) % IO_TRACE_RING_SIZE;
     }
-    io_ring[slot].tick_start = (uint64_t)tick_start;
-    io_ring[slot].tick_end   = (uint64_t)tick_end;
+    io_ring[slot].tsc_start  = tsc_start;
+    io_ring[slot].tsc_end    = tsc_end;
     io_ring[slot].lba        = lba;
     io_ring[slot].count      = count;
-    io_ring[slot].latency    = tick_end - tick_start;
+    /* Convert TSC delta to microseconds (freq calibrated at boot). */
+    uint64_t freq = timer_tsc_freq();
+    io_ring[slot].latency_us = freq ? (uint32_t)((tsc_end - tsc_start) * 1000000ULL / freq) : 0;
     io_ring[slot].result     = (int32_t)result;
-    __asm__ volatile("sti");
+    if (rflags & 0x200) __asm__ volatile("sti");
 }
 
 int io_trace_drain(struct io_record *buf, int max)
@@ -116,6 +120,8 @@ int io_trace_drain(struct io_record *buf, int max)
     if (!buf || max <= 0)
         return 0;
 
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
     __asm__ volatile("cli");
     uint32_t n = io_count < (uint32_t)max ? io_count : (uint32_t)max;
     for (uint32_t i = 0; i < n; i++) {
@@ -124,7 +130,7 @@ int io_trace_drain(struct io_record *buf, int max)
     }
     io_head   = (io_head + n) % IO_TRACE_RING_SIZE;
     io_count -= n;
-    __asm__ volatile("sti");
+    if (rflags & 0x200) __asm__ volatile("sti");
 
     return (int)n;
 }
