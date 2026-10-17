@@ -138,6 +138,7 @@ static void cmd_memtest(void)
  * The kernel ring holds 256 records, so cmd_trace drains in a loop. */
 static switch_record_t trace_buf[8];
 static pf_record_t pf_buf[8];
+static io_record_t io_buf[8];
 
 static void cmd_trace(void)
 {
@@ -193,6 +194,31 @@ static void cmd_pftrace(void)
         total += n;
     }
     puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" fault records\r\n");
+}
+
+/* I/O telemetry: drains the kernel I/O ring and prints records. */
+static void cmd_iotrace(void)
+{
+    char buf[24];
+    long total = 0;
+    for (long iter = 0; iter < 32; iter++) {
+        long n = sys_io_drain(io_buf, 8);
+        if (n < 0) { puts_u("iotrace: drain failed\r\n"); return; }
+        if (n == 0) break;
+        for (long i = 0; i < n; i++) {
+            io_record_t *r = &io_buf[i];
+            puts_u("["); puts_u(itoa(total + i, buf)); puts_u("] ");
+            puts_u("lba="); puts_u(itoa((long)r->lba, buf));
+            puts_u(" count="); puts_u(itoa((long)r->count, buf));
+            puts_u(" lat="); puts_u(itoa((long)r->latency, buf));
+            puts_u("ticks start="); puts_u(itoa((long)r->tick_start, buf));
+            puts_u(" end="); puts_u(itoa((long)r->tick_end, buf));
+            puts_u(" result="); puts_u(itoa((long)r->result, buf));
+            puts_u("\r\n");
+        }
+        total += n;
+    }
+    puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" I/O records\r\n");
 }
 
 /* Machine-readable full trace dump for offline ML training data.
@@ -267,6 +293,7 @@ void _start(long argc, char **argv)
             puts_u("> "); continue;
         }
         if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
+        if (streq(cmd, "iotrace")) { cmd_iotrace(); puts_u("> "); continue; }
 
         if (streq(cmd, "pfpolicy")) {
             long pi = -1;
@@ -337,7 +364,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

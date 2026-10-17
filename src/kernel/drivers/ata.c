@@ -1,5 +1,6 @@
 #include "ata.h"
 #include "../arch/port_io.h"
+#include "../arch/timer.h"
 
 /* Primary ATA channel I/O ports */
 #define ATA_DATA        0x1F0
@@ -61,7 +62,74 @@ int ata_detect(void)
     return 1;
 }
 
+/* Forward declaration: defined below ata_read(). */
+static void io_trace_record(uint32_t lba, uint32_t count,
+                            uint32_t tick_start, uint32_t tick_end,
+                            int result);
+static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf);
+
 int ata_read(uint32_t lba, uint32_t count, uint8_t *buf)
+{
+    uint32_t tick_start = timer_ticks();
+    int result = ata_read_inner(lba, count, buf);
+    uint32_t tick_end = timer_ticks();
+
+    io_trace_record(lba, count, tick_start, tick_end, result);
+    return result;
+}
+
+/* -----------------------------------------------------------------------
+ * I/O telemetry ring (Phase 3, increment 1).
+ *
+ * Records every ata_read(): start/end ticks, LBA, sector count, latency,
+ * and result. Drained by SYS_IO_DRAIN.
+ * ----------------------------------------------------------------------- */
+static struct io_record io_ring[IO_TRACE_RING_SIZE];
+static uint32_t io_head  = 0;   /* index of oldest record */
+static uint32_t io_count = 0;   /* number of valid records */
+
+static void io_trace_record(uint32_t lba, uint32_t count,
+                            uint32_t tick_start, uint32_t tick_end,
+                            int result)
+{
+    __asm__ volatile("cli");
+    uint32_t slot;
+    if (io_count < IO_TRACE_RING_SIZE) {
+        slot = (io_head + io_count) % IO_TRACE_RING_SIZE;
+        io_count++;
+    } else {
+        /* Ring full: overwrite oldest. */
+        slot = io_head;
+        io_head = (io_head + 1) % IO_TRACE_RING_SIZE;
+    }
+    io_ring[slot].tick_start = (uint64_t)tick_start;
+    io_ring[slot].tick_end   = (uint64_t)tick_end;
+    io_ring[slot].lba        = lba;
+    io_ring[slot].count      = count;
+    io_ring[slot].latency    = tick_end - tick_start;
+    io_ring[slot].result     = (int32_t)result;
+    __asm__ volatile("sti");
+}
+
+int io_trace_drain(struct io_record *buf, int max)
+{
+    if (!buf || max <= 0)
+        return 0;
+
+    __asm__ volatile("cli");
+    uint32_t n = io_count < (uint32_t)max ? io_count : (uint32_t)max;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t slot = (io_head + i) % IO_TRACE_RING_SIZE;
+        buf[i] = io_ring[slot];
+    }
+    io_head   = (io_head + n) % IO_TRACE_RING_SIZE;
+    io_count -= n;
+    __asm__ volatile("sti");
+
+    return (int)n;
+}
+
+static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf)
 {
     if (count == 0) return 0;
 

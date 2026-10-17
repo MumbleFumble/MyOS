@@ -13,6 +13,7 @@
 #include "../mem/kheap.h"
 #include "../drivers/vga.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/ata.h"
 #include "../drivers/rtc.h"
 
 /* -----------------------------------------------------------------------
@@ -294,6 +295,18 @@ static int64_t sys_pf_setpolicy(uint64_t index)
     return -1;
 }
 
+/* SYS_IO_DRAIN: io_drain(buf_va, max_records)
+ * Copies up to max_records io_record entries (oldest first) into the
+ * caller's buffer and clears the I/O trace ring.
+ * Returns the number of records written, or -1 on bad args. */
+static int64_t sys_io_drain(uint64_t buf_va, uint64_t max_records)
+{
+    if (!buf_va || max_records == 0 || max_records > 1024)
+        return -1;
+    struct io_record *buf = (struct io_record *)buf_va;
+    return (int64_t)io_trace_drain(buf, (int)max_records);
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -325,6 +338,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TELEMETRY_DRAIN: return sys_telemetry_drain(arg1, arg2);
     case SYS_PF_DRAIN: return sys_pf_drain(arg1, arg2);
     case SYS_PF_SETPOLICY: return sys_pf_setpolicy(arg1);
+    case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
 default:          return -1;  /* ENOSYS */
     }
 }

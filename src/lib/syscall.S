@@ -114,6 +114,13 @@ sys_pf_setpolicy:
     int  0x80
     ret
 
+/* long sys_io_drain(io_record_t *buf, long max_records) */
+.global sys_io_drain
+sys_io_drain:
+    mov  rax, 18        /* SYS_IO_DRAIN */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:
