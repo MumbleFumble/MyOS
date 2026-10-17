@@ -21,6 +21,7 @@
 #define SYS_PF_DRAIN 16  /* pf_drain(buf, max) -> fault records      */
 #define SYS_PF_SETPOLICY 17  /* pf_setpolicy(index) -> 0 or -1      */
 #define SYS_IO_DRAIN 18  /* io_drain(buf, max) -> I/O records       */
+#define SYS_BCACHE_STAT 19  /* bcache_stat(hits_out, misses_out) */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

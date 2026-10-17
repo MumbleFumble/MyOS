@@ -121,6 +121,13 @@ sys_io_drain:
     int  0x80
     ret
 
+/* long sys_bcache_stat(unsigned long *hits, unsigned long *misses) */
+.global sys_bcache_stat
+sys_bcache_stat:
+    mov  rax, 19        /* SYS_BCACHE_STAT */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:

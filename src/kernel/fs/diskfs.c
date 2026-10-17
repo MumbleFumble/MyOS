@@ -1,6 +1,7 @@
 #include "../fs/vfs.h"
 #include "../fs/myfs.h"
 #include "../drivers/ata.h"
+#include "bcache.h"
 #include "../mem/kheap.h"
 
 /* Cache the superblock and per-file sector offsets at mount time */
@@ -56,10 +57,10 @@ static int64_t diskfs_read_op(vfs_node_t *node, uint64_t offset,
         uint64_t copy_end   = disk_off + len < sect_end ? disk_off + len : sect_end;
         uint64_t chunk = copy_end - copy_start;
         if (chunk == 512) {
-            if (ata_read(priv->record_lba + s, 1, buf + done) != 0)
+            if (bcache_read(priv->record_lba + s, buf + done) != 0)
                 return -1;
         } else {
-            if (ata_read(priv->record_lba + s, 1, bounce) != 0)
+            if (bcache_read(priv->record_lba + s, bounce) != 0)
                 return -1;
             uint64_t b_off = copy_start - sect_start;
             for (uint64_t i = 0; i < chunk; i++)

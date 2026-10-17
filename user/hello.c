@@ -196,6 +196,26 @@ static void cmd_pftrace(void)
     puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" fault records\r\n");
 }
 
+/* Block cache stats: shows hits/misses. */
+static void cmd_bcachestat(void)
+{
+    char buf[24];
+    unsigned long hits = 0, misses = 0;
+    if (sys_bcache_stat(&hits, &misses) != 0) {
+        puts_u("bcachestat: failed\r\n");
+        return;
+    }
+    puts_u("hits="); puts_u(itoa((long)hits, buf));
+    puts_u(" misses="); puts_u(itoa((long)misses, buf));
+    unsigned long total = hits + misses;
+    if (total > 0) {
+        /* hit rate as integer percent */
+        unsigned long pct = (hits * 100) / total;
+        puts_u(" hit_rate="); puts_u(itoa((long)pct, buf)); puts_u("%");
+    }
+    puts_u("\r\n");
+}
+
 /* I/O telemetry: drains the kernel I/O ring and prints records. */
 static void cmd_iotrace(void)
 {
@@ -292,6 +312,7 @@ void _start(long argc, char **argv)
         }
         if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
         if (streq(cmd, "iotrace")) { cmd_iotrace(); puts_u("> "); continue; }
+        if (streq(cmd, "bcachestat")) { cmd_bcachestat(); puts_u("> "); continue; }
 
         if (streq(cmd, "pfpolicy")) {
             long pi = -1;
@@ -362,7 +383,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, bcachestat, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

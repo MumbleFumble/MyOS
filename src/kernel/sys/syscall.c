@@ -14,6 +14,7 @@
 #include "../drivers/vga.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/ata.h"
+#include "../fs/bcache.h"
 #include "../drivers/rtc.h"
 
 /* -----------------------------------------------------------------------
@@ -307,6 +308,17 @@ static int64_t sys_io_drain(uint64_t buf_va, uint64_t max_records)
     return (int64_t)io_trace_drain(buf, (int)max_records);
 }
 
+/* SYS_BCACHE_STAT: bcache_stat(hits_va, misses_va)
+ * Writes cache hit/miss counters to userspace. Returns 0 or -1. */
+static int64_t sys_bcache_stat(uint64_t hits_va, uint64_t misses_va)
+{
+    if (!hits_va || !misses_va)
+        return -1;
+    *(uint64_t *)hits_va = bcache_hits();
+    *(uint64_t *)misses_va = bcache_misses();
+    return 0;
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -339,6 +351,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_PF_DRAIN: return sys_pf_drain(arg1, arg2);
     case SYS_PF_SETPOLICY: return sys_pf_setpolicy(arg1);
     case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
+    case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2);
 default:          return -1;  /* ENOSYS */
     }
 }

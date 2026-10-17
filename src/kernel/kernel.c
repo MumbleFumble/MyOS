@@ -4,6 +4,8 @@
 #include "arch/irq.h"
 #include "arch/exceptions.h"
 #include "arch/timer.h"
+#include "drivers/ata.h"
+#include "fs/bcache.h"
 #include "arch/port_io.h"
 #include "mem/multiboot.h"
 #include "mem/pmm.h"
@@ -276,6 +278,8 @@ void kernel_main(struct multiboot_info *mb_info)
         vfs_init();
         serial_puts("[serial] vfs/ramfs init done\r\n");
     }
+
+    bcache_init();
 
     /* Mount disk filesystem (optional — continues if no ATA disk found) */
     {
