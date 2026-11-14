@@ -29,6 +29,42 @@ static struct {
 } shadow[BCACHE_SIZE];
 static uint32_t shadow_clock = 0;
 
+/* Demand-access trace ring (Phase 3, increment 5). */
+static struct access_record acc_ring[ACCESS_TRACE_RING_SIZE];
+static uint32_t acc_head = 0;   /* index of oldest record */
+static uint32_t acc_count = 0;  /* number of valid records */
+static uint64_t acc_seq = 0;    /* monotonic access counter */
+
+static void access_trace_record(uint32_t lba, int hit)
+{
+    uint32_t slot;
+    if (acc_count < ACCESS_TRACE_RING_SIZE) {
+        slot = (acc_head + acc_count) % ACCESS_TRACE_RING_SIZE;
+        acc_count++;
+    } else {
+        /* Ring full: overwrite oldest. */
+        slot = acc_head;
+        acc_head = (acc_head + 1) % ACCESS_TRACE_RING_SIZE;
+    }
+    acc_ring[slot].seq = ++acc_seq;
+    acc_ring[slot].lba = lba;
+    acc_ring[slot].hit = hit ? 1 : 0;
+}
+
+int access_trace_drain(struct access_record *buf, int max)
+{
+    if (!buf || max <= 0)
+        return 0;
+    uint32_t n = acc_count < (uint32_t)max ? acc_count : (uint32_t)max;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t slot = (acc_head + i) % ACCESS_TRACE_RING_SIZE;
+        buf[i] = acc_ring[slot];
+    }
+    acc_head = (acc_head + n) % ACCESS_TRACE_RING_SIZE;
+    acc_count -= n;
+    return (int)n;
+}
+
 void bcache_init(void)
 {
     for (int i = 0; i < BCACHE_SIZE; i++)
@@ -40,6 +76,9 @@ void bcache_init(void)
     shadow_clock = 0;
     for (int i = 0; i < BCACHE_SIZE; i++)
         shadow[i].valid = 0;
+    acc_head = 0;
+    acc_count = 0;
+    acc_seq = 0;
 }
 
 /* Find entry by LBA. Returns index or -1. */
@@ -136,7 +175,9 @@ int bcache_read(uint32_t lba, uint8_t *buf)
         stat_misses++;
     }
 
-    /* Notify prefetch policy (may issue prefetches). */
+    /* Record the demand access for offline prefetch training, then
+     * notify the prefetch policy (may issue prefetches). */
+    access_trace_record(lba, hit);
     prefetch_on_access(lba, hit);
     return 0;
 }

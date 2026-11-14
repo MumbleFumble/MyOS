@@ -139,6 +139,7 @@ static void cmd_memtest(void)
 static switch_record_t trace_buf[8];
 static pf_record_t pf_buf[8];
 static io_record_t io_buf[8];
+static access_record_t acc_buf[16];
 
 static void cmd_trace(void)
 {
@@ -239,6 +240,29 @@ static void cmd_iotrace(void)
     puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" I/O records\r\n");
 }
 
+/* Demand-access trace: drains the bcache access ring and prints
+ * machine-readable ACC lines for offline prefetch training:
+ *   ACC seq=<n> lba=<n> hit=<0|1> */
+static void cmd_acctrace(void)
+{
+    char buf[24];
+    long total = 0;
+    for (long iter = 0; iter < 512; iter++) {
+        long n = sys_access_drain(acc_buf, 16);
+        if (n < 0) { puts_u("acctrace: drain failed\r\n"); return; }
+        if (n == 0) break;
+        for (long i = 0; i < n; i++) {
+            access_record_t *r = &acc_buf[i];
+            puts_u("ACC seq="); puts_u(itoa((long)r->seq, buf));
+            puts_u(" lba="); puts_u(itoa((long)r->lba, buf));
+            puts_u(" hit="); puts_u(itoa((long)r->hit, buf));
+            puts_u("\r\n");
+        }
+        total += n;
+    }
+    puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" access records\r\n");
+}
+
 /* Machine-readable full trace dump for offline ML training data.
  * Prints every drained record with all per-task snapshots, one REC line
  * followed by one TASK line per task slot:
@@ -312,6 +336,7 @@ void _start(long argc, char **argv)
         }
         if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
         if (streq(cmd, "iotrace")) { cmd_iotrace(); puts_u("> "); continue; }
+        if (streq(cmd, "acctrace")) { cmd_acctrace(); puts_u("> "); continue; }
         if (streq(cmd, "bcachestat")) { cmd_bcachestat(); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -391,7 +416,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, bcachestat, prefetch <0|1|2>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, prefetch <0|1|2>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

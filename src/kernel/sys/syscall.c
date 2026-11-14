@@ -330,6 +330,17 @@ static int64_t sys_prefetch_policy(uint64_t index)
     return -1;
 }
 
+/* SYS_ACCESS_DRAIN: access_drain(buf_va, max_records)
+ * Copies up to max_records demand-access records (oldest first) into
+ * the caller's buffer. Returns the number of records written, or -1. */
+static int64_t sys_access_drain(uint64_t buf_va, uint64_t max_records)
+{
+    if (!buf_va || max_records == 0 || max_records > 4096)
+        return -1;
+    struct access_record *buf = (struct access_record *)buf_va;
+    return (int64_t)access_trace_drain(buf, (int)max_records);
+}
+
 /* -----------------------------------------------------------------------
  * Dispatch table
  * ----------------------------------------------------------------------- */
@@ -364,6 +375,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
     case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2);
     case SYS_PREFETCH_POLICY: return sys_prefetch_policy(arg1);
+    case SYS_ACCESS_DRAIN: return sys_access_drain(arg1, arg2);
 default:          return -1;  /* ENOSYS */
     }
 }

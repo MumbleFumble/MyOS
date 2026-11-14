@@ -135,6 +135,13 @@ sys_prefetch_policy:
     int  0x80
     ret
 
+/* long sys_access_drain(access_record_t *buf, long max_records) */
+.global sys_access_drain
+sys_access_drain:
+    mov  rax, 21        /* SYS_ACCESS_DRAIN */
+    int  0x80
+    ret
+
 /* long sys_setpolicy(long index) */
 .global sys_setpolicy
 sys_setpolicy:

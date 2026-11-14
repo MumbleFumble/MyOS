@@ -42,3 +42,20 @@ uint64_t bcache_pollution_misses(void);
 /* Hit/miss statistics. */
 uint64_t bcache_hits(void);
 uint64_t bcache_misses(void);
+
+/* Demand-access trace (Phase 3, increment 5): every bcache_read demand
+ * access (not prefetches) is recorded in a ring, drained by
+ * SYS_ACCESS_DRAIN. This is the training data for the learned prefetch
+ * policy: the offline simulator replays the demand stream through
+ * candidate policies. */
+struct access_record {
+    uint64_t seq;   /* monotonic access counter */
+    uint32_t lba;   /* requested block */
+    uint32_t hit;   /* 1 if the access hit the cache */
+};
+
+#define ACCESS_TRACE_RING_SIZE 4096
+
+/* Copy up to max records (oldest first) into buf and consume them.
+ * Returns the number of records written. */
+int access_trace_drain(struct access_record *buf, int max);

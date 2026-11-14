@@ -21,6 +21,7 @@
 #define SYS_IO_DRAIN 18
 #define SYS_BCACHE_STAT 19
 #define SYS_PREFETCH_POLICY 20
+#define SYS_ACCESS_DRAIN 21
 
 /* Policy indices for sys_setpolicy() */
 #define SCHED_POLICY_RR  0   /* round-robin  */
@@ -124,3 +125,12 @@ typedef struct {
 long sys_io_drain(io_record_t *buf, long max_records);
 long sys_bcache_stat(unsigned long *hits, unsigned long *misses);
 long sys_prefetch_policy(long index);
+
+/* Demand access record -- mirrors kernel struct access_record exactly. */
+typedef struct {
+    unsigned long  seq;
+    unsigned int   lba;
+    unsigned int   hit;
+} access_record_t;           /* 16 bytes */
+
+long sys_access_drain(access_record_t *buf, long max_records);
