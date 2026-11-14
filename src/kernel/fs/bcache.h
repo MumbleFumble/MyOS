@@ -35,6 +35,12 @@ void bcache_invalidate(void);
  * No-op if already cached. Used by prefetch policies. */
 void bcache_prefetch(uint32_t lba);
 
+/* Prefetch one block, inserting at the MRU end so the block survives
+ * until its demand arrives. Used by the learned policy, whose score is
+ * a confidence estimate (Phase 3 inc.6 finding: LRU-end insertion makes
+ * each new prefetch the next eviction victim under a full cache). */
+void bcache_prefetch_mru(uint32_t lba);
+
 /* Pollution stats: demand misses that would have hit without prefetching
  * (measured via shadow cache). */
 uint64_t bcache_pollution_misses(void);

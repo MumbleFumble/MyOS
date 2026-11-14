@@ -149,7 +149,9 @@ int bcache_read(uint32_t lba, uint8_t *buf)
         /* Hit: copy from cache. */
         for (int i = 0; i < 512; i++)
             buf[i] = cache[idx].data[i];
-        cache[idx].prefetched_unused = 0;  /* consumed a prefetch */
+        if (cache[idx].prefetched_unused)
+            prefetch_note_outcome(1);  /* consumed a prefetch */
+        cache[idx].prefetched_unused = 0;
         bcache_touch(idx);
         stat_hits++;
     } else {
@@ -163,6 +165,8 @@ int bcache_read(uint32_t lba, uint8_t *buf)
             return -1;
 
         int v = bcache_victim();
+        if (cache[v].valid && cache[v].prefetched_unused)
+            prefetch_note_outcome(0);  /* prefetch evicted unused */
         cache[v].lba = lba;
         for (int i = 0; i < 512; i++) {
             cache[v].data[i] = tmp[i];
@@ -207,6 +211,8 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data)
     }
 
     int v = bcache_victim();
+    if (cache[v].valid && cache[v].prefetched_unused)
+        prefetch_note_outcome(0);  /* prefetch evicted unused */
     /* Prefetches go to the LRU end: use a sequence number older than any
      * real access so a bad prefetch doesn't evict useful data. */
     cache[v].lba = lba;
@@ -222,6 +228,39 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data)
             min_seq = cache[i].lru_seq;
     }
     cache[v].lru_seq = (min_seq == 0xFFFFFFFF) ? 0 : min_seq - 1;
+}
+
+/* Insert a block at the MRU end, marked prefetched. See bcache.h. */
+void bcache_prefetch_insert_mru(uint32_t lba, const uint8_t *data)
+{
+    int idx = bcache_lookup(lba);
+    if (idx >= 0) {
+        bcache_touch(idx);
+        return;
+    }
+
+    int v = bcache_victim();
+    if (cache[v].valid && cache[v].prefetched_unused)
+        prefetch_note_outcome(0);  /* prefetch evicted unused */
+    cache[v].lba = lba;
+    for (int i = 0; i < 512; i++)
+        cache[v].data[i] = data[i];
+    cache[v].valid = 1;
+    cache[v].prefetched_unused = 1;
+    cache[v].dirty = 0;
+    bcache_touch(v);  /* MRU end: newest sequence number */
+}
+
+void bcache_prefetch_mru(uint32_t lba)
+{
+    if (bcache_lookup(lba) >= 0)
+        return;
+
+    uint8_t tmp[512];
+    if (ata_read(lba, 1, tmp) != 0)
+        return;  /* best-effort: ignore errors */
+
+    bcache_prefetch_insert_mru(lba, tmp);
 }
 
 void bcache_invalidate(void)
