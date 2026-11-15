@@ -131,6 +131,8 @@ typedef struct {
     unsigned long  seq;
     unsigned int   lba;
     unsigned int   hit;
-} access_record_t;           /* 16 bytes */
+    unsigned int   file_id;
+    unsigned int   file_off;
+} access_record_t;           /* 24 bytes */
 
 long sys_access_drain(access_record_t *buf, long max_records);

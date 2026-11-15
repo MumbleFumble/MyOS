@@ -56,11 +56,16 @@ static int64_t diskfs_read_op(vfs_node_t *node, uint64_t offset,
         uint64_t sect_end   = sect_start + 512;
         uint64_t copy_end   = disk_off + len < sect_end ? disk_off + len : sect_end;
         uint64_t chunk = copy_end - copy_start;
+        /* File context for the prefetch policy (Phase 3 inc.9):
+         * file_id = directory entry index + 1 (0 = no file), file_off =
+         * sector index within the file's record. */
         if (chunk == 512) {
-            if (bcache_read(priv->record_lba + s, buf + done) != 0)
+            if (bcache_read_ctx(priv->record_lba + s, buf + done,
+                                (uint32_t)priv->entry_idx + 1, s) != 0)
                 return -1;
         } else {
-            if (bcache_read(priv->record_lba + s, bounce) != 0)
+            if (bcache_read_ctx(priv->record_lba + s, bounce,
+                                (uint32_t)priv->entry_idx + 1, s) != 0)
                 return -1;
             uint64_t b_off = copy_start - sect_start;
             for (uint64_t i = 0; i < chunk; i++)

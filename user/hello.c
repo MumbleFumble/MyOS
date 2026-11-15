@@ -256,6 +256,8 @@ static void cmd_acctrace(void)
             puts_u("ACC seq="); puts_u(itoa((long)r->seq, buf));
             puts_u(" lba="); puts_u(itoa((long)r->lba, buf));
             puts_u(" hit="); puts_u(itoa((long)r->hit, buf));
+            puts_u(" file="); puts_u(itoa((long)r->file_id, buf));
+            puts_u(" off="); puts_u(itoa((long)r->file_off, buf));
             puts_u("\r\n");
         }
         total += n;

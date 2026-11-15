@@ -35,7 +35,8 @@ static uint32_t acc_head = 0;   /* index of oldest record */
 static uint32_t acc_count = 0;  /* number of valid records */
 static uint64_t acc_seq = 0;    /* monotonic access counter */
 
-static void access_trace_record(uint32_t lba, int hit)
+static void access_trace_record(uint32_t lba, int hit, uint32_t file_id,
+                                uint32_t file_off)
 {
     uint32_t slot;
     if (acc_count < ACCESS_TRACE_RING_SIZE) {
@@ -49,6 +50,8 @@ static void access_trace_record(uint32_t lba, int hit)
     acc_ring[slot].seq = ++acc_seq;
     acc_ring[slot].lba = lba;
     acc_ring[slot].hit = hit ? 1 : 0;
+    acc_ring[slot].file_id = file_id;
+    acc_ring[slot].file_off = file_off;
 }
 
 int access_trace_drain(struct access_record *buf, int max)
@@ -143,6 +146,12 @@ static void shadow_insert(uint32_t lba)
 
 int bcache_read(uint32_t lba, uint8_t *buf)
 {
+    return bcache_read_ctx(lba, buf, 0, 0);
+}
+
+int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
+                    uint32_t file_off)
+{
     int idx = bcache_lookup(lba);
     int hit = (idx >= 0);
     if (hit) {
@@ -181,8 +190,8 @@ int bcache_read(uint32_t lba, uint8_t *buf)
 
     /* Record the demand access for offline prefetch training, then
      * notify the prefetch policy (may issue prefetches). */
-    access_trace_record(lba, hit);
-    prefetch_on_access(lba, hit);
+    access_trace_record(lba, hit, file_id, file_off);
+    prefetch_on_access(lba, hit, file_id, file_off);
     return 0;
 }
 

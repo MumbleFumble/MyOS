@@ -26,10 +26,11 @@ struct prefetch_policy *prefetch_get_policy(void)
     return active_policy;
 }
 
-void prefetch_on_access(uint32_t lba, int hit)
+void prefetch_on_access(uint32_t lba, int hit, uint32_t file_id,
+                        uint32_t file_off)
 {
     if (active_policy && active_policy->on_access)
-        active_policy->on_access(lba, hit);
+        active_policy->on_access(lba, hit, file_id, file_off);
 }
 
 void prefetch_note_outcome(int useful)
@@ -39,9 +40,10 @@ void prefetch_note_outcome(int useful)
 }
 
 /* --- none: no prefetching --- */
-static void none_on_access(uint32_t lba, int hit)
+static void none_on_access(uint32_t lba, int hit, uint32_t file_id,
+                           uint32_t file_off)
 {
-    (void)lba; (void)hit;
+    (void)lba; (void)hit; (void)file_id; (void)file_off;
 }
 static void none_reset(void) {}
 
@@ -55,9 +57,10 @@ struct prefetch_policy prefetch_none = {
 static uint32_t seq_last_lba = 0;
 static int seq_has_last = 0;
 
-static void seq_on_access(uint32_t lba, int hit)
+static void seq_on_access(uint32_t lba, int hit, uint32_t file_id,
+                          uint32_t file_off)
 {
-    (void)hit;
+    (void)hit; (void)file_id; (void)file_off;
     if (seq_has_last && lba == seq_last_lba + 1) {
         /* Sequential: prefetch next 4 blocks. */
         for (uint32_t i = 1; i <= 4; i++)
@@ -81,9 +84,10 @@ struct prefetch_policy prefetch_sequential = {
 static uint32_t stride_lba[3] = {0, 0, 0};
 static int stride_count = 0;
 
-static void stride_on_access(uint32_t lba, int hit)
+static void stride_on_access(uint32_t lba, int hit, uint32_t file_id,
+                             uint32_t file_off)
 {
-    (void)hit;
+    (void)hit; (void)file_id; (void)file_off;
     stride_lba[0] = stride_lba[1];
     stride_lba[1] = stride_lba[2];
     stride_lba[2] = lba;
@@ -173,9 +177,10 @@ static int32_t l_dist_fp(uint32_t a)
     return 1024 / (1 + lg);
 }
 
-static void learned_on_access(uint32_t lba, int hit)
+static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
+                              uint32_t file_off)
 {
-    (void)hit;
+    (void)hit; (void)file_id; (void)file_off;  /* file features: inc.10 */
     l_index++;
     uint32_t slot = lba % L_SEEN_SIZE;
     l_seen_lba[slot] = lba;

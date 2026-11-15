@@ -24,6 +24,14 @@ void bcache_init(void);
  * if full), buf filled, misses++. */
 int bcache_read(uint32_t lba, uint8_t *buf);
 
+/* As bcache_read, with the demand's file context (Phase 3 inc.9):
+ * file_id identifies the file being read (diskfs directory index + 1,
+ * 0 = no file context) and file_off is the sector index within the
+ * file. The context is recorded in the access trace and passed to the
+ * prefetch policy, whose LBA-only view distorts per-file streams. */
+int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
+                    uint32_t file_off);
+
 /* Insert a block into the cache, marked as prefetched (prefetched_unused=1).
  * Used by the prefetch policy. Evicts LRU entry if full. */
 void bcache_prefetch_insert(uint32_t lba, const uint8_t *data);
@@ -55,9 +63,11 @@ uint64_t bcache_misses(void);
  * policy: the offline simulator replays the demand stream through
  * candidate policies. */
 struct access_record {
-    uint64_t seq;   /* monotonic access counter */
-    uint32_t lba;   /* requested block */
-    uint32_t hit;   /* 1 if the access hit the cache */
+    uint64_t seq;     /* monotonic access counter */
+    uint32_t lba;     /* requested block */
+    uint32_t hit;     /* 1 if the access hit the cache */
+    uint32_t file_id; /* file being read (0 = no file context) */
+    uint32_t file_off;/* sector index within the file */
 };
 
 #define ACCESS_TRACE_RING_SIZE 4096
