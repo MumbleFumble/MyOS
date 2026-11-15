@@ -114,21 +114,31 @@ struct prefetch_policy prefetch_stride = {
     .reset = stride_reset,
 };
 
-/* --- learned: candidate generation + linear scoring (inc.7) ---
+/* --- learned: candidate generation + linear scoring (inc.7, file
+ * features inc.10) ---
  *
  * Kernel port of scripts/sim_prefetch.py's LearnedPolicy, with weights
  * trained offline by scripts/train_prefetch.py (prefetch_weights.h,
- * fixed point x1024). On each access it scores candidate offsets
- * {1,2,3,4, d1, 2*d1, d2} over features of the recent stream and
+ * fixed point x1024). On each access it scores candidate targets and
  * prefetches (MRU-end insertion) every candidate scoring above the
- * threshold. Accuracy feedback comes from bcache via note_outcome:
- * a prefetched block that is hit is useful, one evicted unused is
- * wasted; the last 32 outcomes form the recent_acc feature.
+ * threshold. Candidates are the global offsets {1,2,3,4, d1, 2*d1, d2}
+ * plus the next block of up to 3 other recently-read files.
+ *
+ * Accuracy feedback comes from bcache via note_outcome: a prefetched
+ * block that is hit is useful, one evicted unused is wasted; the last
+ * 32 outcomes form the recent_acc feature.
+ *
+ * File features (inc.10): diskfs supplies (file_id, file_off) with each
+ * demand. A per-file table tracks the last two offsets per file, so the
+ * policy can see each file's own stream (file_seq, file_stride) and
+ * prefetch another file's continuation before the reader switches back
+ * to it (file_seq_other, the single largest trained weight).
  */
 #include "prefetch_weights.h"
 
 #define L_HIST 8
 #define L_SEEN_SIZE 1024
+#define L_FILES 16
 
 static uint32_t l_prev1, l_prev2;
 static int l_has1, l_has2;
@@ -140,6 +150,23 @@ static int l_out_n, l_out_useful;
 static uint64_t l_index;
 static uint32_t l_seen_lba[L_SEEN_SIZE];
 static uint32_t l_seen_idx[L_SEEN_SIZE];
+
+/* Per-file stream state (inc.10). lf_id 0 = empty slot. */
+static uint32_t lf_id[L_FILES];
+static uint32_t lf_last_off[L_FILES];
+static uint32_t lf_last_lba[L_FILES];
+static uint32_t lf_prev_off[L_FILES];
+static int lf_has_prev[L_FILES];
+static uint32_t lf_order[L_FILES];  /* file_ids, most recent last */
+static int lf_order_n;
+
+static int lf_find(uint32_t file_id)
+{
+    for (int i = 0; i < L_FILES; i++)
+        if (lf_id[i] == file_id)
+            return i;
+    return -1;
+}
 
 static void learned_note_outcome(int useful)
 {
@@ -166,6 +193,11 @@ static void learned_reset(void)
         l_seen_lba[i] = 0xFFFFFFFFu;
         l_seen_idx[i] = 0;
     }
+    for (int i = 0; i < L_FILES; i++) {
+        lf_id[i] = 0;
+        lf_has_prev[i] = 0;
+    }
+    lf_order_n = 0;
 }
 
 /* Fixed-point feature value for distance: 1024 / (1 + floor(log2(a))). */
@@ -180,7 +212,7 @@ static int32_t l_dist_fp(uint32_t a)
 static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
                               uint32_t file_off)
 {
-    (void)hit; (void)file_id; (void)file_off;  /* file features: inc.10 */
+    (void)hit;
     l_index++;
     uint32_t slot = lba % L_SEEN_SIZE;
     l_seen_lba[slot] = lba;
@@ -206,6 +238,9 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
             break;
         }
     }
+
+    /* Current file's pre-access stream state. */
+    int cur = (file_id != 0) ? lf_find(file_id) : -1;
 
     int32_t cands[7];
     cands[0] = 1; cands[1] = 2; cands[2] = 3; cands[3] = 4;
@@ -243,9 +278,87 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
             score += PW_JUMP;
         if (off == 1 && stream_cont)
             score += PW_STREAM_CONT;
+        if (cur >= 0) {
+            if (file_off == lf_last_off[cur] + 1 && off == 1)
+                score += PW_FILE_SEQ;
+            if (lf_has_prev[cur]) {
+                int32_t fd_now = (int32_t)(file_off - lf_last_off[cur]);
+                int32_t fd_prev = (int32_t)(lf_last_off[cur] - lf_prev_off[cur]);
+                if (fd_now != 0 && fd_now == fd_prev && off == fd_now)
+                    score += PW_FILE_STRIDE;
+            }
+        }
 
         if (score > PW_THRESHOLD)
             bcache_prefetch_mru(target);
+    }
+
+    /* Other files' continuations (file_seq_other). */
+    if (file_id != 0) {
+        int others = 0;
+        for (int oi = lf_order_n - 1; oi >= 0 && others < 3; oi--) {
+            uint32_t fid = lf_order[oi];
+            if (fid == file_id)
+                continue;
+            int fi = lf_find(fid);
+            if (fi < 0)
+                continue;
+            uint32_t target = lf_last_lba[fi] + 1;
+            uint32_t gap = target > lba ? target - lba : lba - target;
+            int32_t score = PW_BIAS + PW_FILE_SEQ_OTHER;
+            score += (PW_DIST * l_dist_fp(gap)) / 1024;
+            score += (PW_RECENT_ACC * acc_fp) / 1024;
+            if (score > PW_THRESHOLD)
+                bcache_prefetch_mru(target);
+            others++;
+        }
+    }
+
+    /* Update per-file state after scoring. */
+    if (file_id != 0) {
+        int fi = cur;
+        if (fi < 0) {
+            /* Claim a free slot, else evict the least recently read
+             * file (and drop its id from the order list). */
+            fi = lf_find(0);
+            if (fi < 0) {
+                for (int oi = 0; oi < lf_order_n && fi < 0; oi++) {
+                    int cand = lf_find(lf_order[oi]);
+                    if (cand >= 0) {
+                        fi = cand;
+                        for (int i = oi; i + 1 < lf_order_n; i++)
+                            lf_order[i] = lf_order[i + 1];
+                        lf_order_n--;
+                    }
+                }
+            }
+            if (fi < 0)
+                fi = 0;  /* unreachable: order covers every live slot */
+            lf_id[fi] = file_id;
+            lf_has_prev[fi] = 0;
+            lf_last_off[fi] = file_off;
+            lf_last_lba[fi] = lba;
+        } else {
+            lf_prev_off[fi] = lf_last_off[fi];
+            lf_has_prev[fi] = 1;
+            lf_last_off[fi] = file_off;
+            lf_last_lba[fi] = lba;
+        }
+        /* Move file_id to the most-recent end of lf_order. */
+        int pos = -1;
+        for (int i = 0; i < lf_order_n; i++)
+            if (lf_order[i] == file_id)
+                pos = i;
+        if (pos >= 0) {
+            for (int i = pos; i + 1 < lf_order_n; i++)
+                lf_order[i] = lf_order[i + 1];
+            lf_order_n--;
+        } else if (lf_order_n == L_FILES) {
+            for (int i = 0; i + 1 < L_FILES; i++)
+                lf_order[i] = lf_order[i + 1];
+            lf_order_n = L_FILES - 1;
+        }
+        lf_order[lf_order_n++] = file_id;
     }
 
     /* Push current access into history. */

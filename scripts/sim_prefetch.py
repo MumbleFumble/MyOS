@@ -78,7 +78,7 @@ class Cache:
         self.shadow_present.add(lba)
         return False
 
-    def demand(self, lba):
+    def demand(self, lba, file_id=0, file_off=0):
         hit = lba in self.present
         shadow_hit = self._shadow_access(lba)
         if hit:
@@ -97,7 +97,7 @@ class Cache:
                 self._evict_lru()
             self.order.append(lba)
             self.present.add(lba)
-        self.policy.on_access(self, lba, hit)
+        self.policy.on_access(self, lba, hit, file_id, file_off)
         return hit
 
     def prefetch(self, lba):
@@ -137,7 +137,7 @@ class Policy:
     def note_outcome(self, useful):
         pass
 
-    def on_access(self, cache, lba, hit):
+    def on_access(self, cache, lba, hit, file_id=0, file_off=0):
         pass
 
 
@@ -152,7 +152,7 @@ class SequentialPolicy(Policy):
         self.has_last = False
         self.last = 0
 
-    def on_access(self, cache, lba, hit):
+    def on_access(self, cache, lba, hit, file_id=0, file_off=0):
         if self.has_last and lba == self.last + 1:
             for i in range(1, 5):
                 cache.prefetch(lba + i)
@@ -167,7 +167,7 @@ class StridePolicy(Policy):
         self.hist = []
         self.count = 0
 
-    def on_access(self, cache, lba, hit):
+    def on_access(self, cache, lba, hit, file_id=0, file_off=0):
         self.hist.append(lba)
         self.hist = self.hist[-3:]
         if self.count < 3:
@@ -190,7 +190,7 @@ class OraclePolicy(Policy):
     def set_trace(self, trace):
         self.trace = trace
 
-    def on_access(self, cache, lba, hit):
+    def on_access(self, cache, lba, hit, file_id=0, file_off=0):
         i = self.idx
         issued = 0
         seen = set()
@@ -217,14 +217,24 @@ FEATURES = [
     "dist",              # 1/(1+floor(log2(|offset|))): prefer near blocks
     "recent_acc",        # useful/(useful+wasted) over last 32 outcomes
     "reuse",             # target demanded within the last 512 accesses
-    "jump",              # |d1| > 4: stream just jumped (all candidates)
+    "jump",              # |d1| > 4: stream just jumped (global candidates)
     "stream_cont",       # offset == 1 and lba continues a stream seen
-                         # 2..8 accesses ago (lba == that lba + 1):
-                         # interleaved sequential streams, any count
+                         # 2..8 accesses ago (interleaved streams)
+    "file_seq",          # candidate is the current file's next offset,
+                         # and this access continues that file's stream
+    "file_seq_other",    # candidate is another recently-read file's
+                         # next offset (reader will switch back to it)
+    "file_stride",       # candidate continues the current file's
+                         # repeated offset delta
 ]
 
 
 class LearnedPolicy(Policy):
+    """Candidate generation + linear scoring (inc.7), extended in inc.10
+    with per-file stream state: the policy tracks each file's last two
+    offsets and can prefetch the continuation of a file other than the
+    one currently being read."""
+
     name = "learned"
 
     def __init__(self, weights, threshold=0.0):
@@ -240,13 +250,20 @@ class LearnedPolicy(Policy):
         self.outcomes = []       # last 32 booleans
         self.last_seen = {}      # lba -> access index
         self.index = 0
+        self.files = {}          # file_id -> [last_off, last_lba, prev_off]
+        self.file_order = []     # file_ids, most recent last
 
     def note_outcome(self, useful):
         self.outcomes.append(useful)
         self.outcomes = self.outcomes[-32:]
 
-    def _features(self, offset, target, d1, d2):
-        f = {}
+    def _recent_acc(self):
+        if self.outcomes:
+            return sum(self.outcomes) / len(self.outcomes)
+        return 0.5
+
+    def _global_features(self, offset, target, d1, d2):
+        f = {k: 0.0 for k in FEATURES}
         f["bias"] = 1.0
         f["is_next"] = 1.0 if offset == 1 else 0.0
         f["stride_confirmed"] = 1.0 if (d1 is not None and offset == d1 == d2 and d1 != 0) else 0.0
@@ -254,25 +271,18 @@ class LearnedPolicy(Policy):
         f["seq_run"] = (min(self.seq_run, 4) / 4.0) if 1 <= offset <= 4 else 0.0
         a = abs(offset)
         f["dist"] = 1.0 / (1 + (a.bit_length() - 1)) if a >= 1 else 0.0
-        if self.outcomes:
-            f["recent_acc"] = sum(self.outcomes) / len(self.outcomes)
-        else:
-            f["recent_acc"] = 0.5
+        f["recent_acc"] = self._recent_acc()
         last = self.last_seen.get(target)
         f["reuse"] = 1.0 if (last is not None and self.index - last <= 512) else 0.0
         f["jump"] = 1.0 if (d1 is not None and abs(d1) > 4) else 0.0
-        f["stream_cont"] = 0.0
         if offset == 1 and self._lba_now is not None:
-            # hist holds previous accesses; hist[-1] is the immediately
-            # previous one (plain sequential, covered by other features),
-            # so look at accesses 2..8 back for a +1 continuation.
             for h in self.hist[:-1]:
                 if self._lba_now - h == 1:
                     f["stream_cont"] = 1.0
                     break
         return f
 
-    def on_access(self, cache, lba, hit):
+    def on_access(self, cache, lba, hit, file_id=0, file_off=0):
         self.index += 1
         self._lba_now = lba
         self.last_seen[lba] = self.index
@@ -283,20 +293,64 @@ class LearnedPolicy(Policy):
         else:
             self.seq_run = 0
 
-        candidates = {1, 2, 3, 4}
+        cands = {}
+
+        def add(target, feats):
+            if target not in cands:
+                cands[target] = feats
+
+        # Global offset candidates, with current-file features merged in.
+        offsets = {1, 2, 3, 4}
         if d1:
-            candidates.add(d1)
-            candidates.add(2 * d1)
+            offsets.add(d1)
+            offsets.add(2 * d1)
         if d2:
-            candidates.add(d2)
-        for off in sorted(candidates):
+            offsets.add(d2)
+        cur = self.files.get(file_id) if file_id else None
+        for off in sorted(offsets):
             if off <= 0 or off > 64:
                 continue
-            target = lba + off
-            feats = self._features(off, target, d1, d2)
+            feats = self._global_features(off, lba + off, d1, d2)
+            if cur is not None:
+                last_off, _ll, prev_off = cur
+                if file_off == last_off + 1 and off == 1:
+                    feats["file_seq"] = 1.0
+                if prev_off is not None:
+                    fd_now = file_off - last_off
+                    fd_prev = last_off - prev_off
+                    if fd_now != 0 and fd_now == fd_prev and off == fd_now:
+                        feats["file_stride"] = 1.0
+            add(lba + off, feats)
+
+        # Other files' continuations: when the reader switches back,
+        # that file's next block should already be cached.
+        if file_id:
+            others = 0
+            for fid in reversed(self.file_order):
+                if fid == file_id or others >= 3:
+                    continue
+                _lo, last_lba, _po = self.files[fid]
+                feats = {k: 0.0 for k in FEATURES}
+                feats["bias"] = 1.0
+                feats["file_seq_other"] = 1.0
+                gap = abs((last_lba + 1) - lba)
+                feats["dist"] = 1.0 / (1 + (gap.bit_length() - 1)) if gap >= 1 else 0.0
+                feats["recent_acc"] = self._recent_acc()
+                add(last_lba + 1, feats)
+                others += 1
+
+        for target, feats in cands.items():
             score = sum(self.weights.get(k, 0.0) * v for k, v in feats.items())
             if score > self.threshold:
                 cache.prefetch_mru(target)
+
+        # Update per-file state after scoring.
+        if file_id:
+            prev = self.files.get(file_id)
+            self.files[file_id] = [file_off, lba, prev[0] if prev else None]
+            if file_id in self.file_order:
+                self.file_order.remove(file_id)
+            self.file_order.append(file_id)
 
         self.hist.append(lba)
         self.hist = self.hist[-8:]
@@ -308,11 +362,11 @@ def run_trace(trace, policy):
     cache = Cache(policy)
     policy.reset()
     if isinstance(policy, OraclePolicy):
-        policy.set_trace(trace)
-    for i, lba in enumerate(trace):
+        policy.set_trace([t[0] for t in trace])
+    for i, (lba, fid, foff) in enumerate(trace):
         if isinstance(policy, OraclePolicy):
             policy.idx = i
-        cache.demand(lba)
+        cache.demand(lba, fid, foff)
     return cache
 
 
@@ -331,35 +385,65 @@ def report(name, cache, base_misses):
 
 
 def load_trace(path):
-    lbas = []
-    acc_re = re.compile(r"ACC seq=\d+ lba=(\d+)")
+    trace = []
+    acc_re = re.compile(r"ACC seq=\d+ lba=(\d+) hit=\d+(?: file=(\d+) off=(\d+))?")
     with open(path) as f:
         for line in f:
             m = acc_re.search(line)
             if m:
-                lbas.append(int(m.group(1)))
+                fid = int(m.group(2)) if m.group(2) else 0
+                foff = int(m.group(3)) if m.group(3) else 0
+                trace.append((int(m.group(1)), fid, foff))
                 continue
             line = line.strip()
             if line.isdigit():
-                lbas.append(int(line))
-    return lbas
+                trace.append((int(line), 0, 0))
+    return trace
+
+
+def _one_file(lbas, base, fid=1):
+    return [(l, fid, l - base) for l in lbas]
+
+
+def _files(files, count, chunk):
+    """Round-robin chunked reads of several files. files = [(fid, base)]."""
+    out = []
+    pos = {fid: 0 for fid, _ in files}
+    remaining = count * len(files)
+    while remaining > 0:
+        for fid, base in files:
+            for _ in range(chunk):
+                if pos[fid] >= count:
+                    break
+                out.append((base + pos[fid], fid, pos[fid]))
+                pos[fid] += 1
+                remaining -= 1
+    return out
 
 
 def synthetic(name):
     if name == "seq":
-        return list(range(200, 2200))
+        return _one_file(range(200, 2200), 200)
     if name == "stride":
-        return [100 + 4 * i for i in range(2000)]
+        return _one_file([100 + 4 * i for i in range(2000)], 100)
     if name == "stride3":
-        return [7000 + 3 * i for i in range(1800)]
+        return _one_file([7000 + 3 * i for i in range(1800)], 7000)
     if name == "stride16":
-        return [20000 + 16 * i for i in range(1200)]
+        return _one_file([20000 + 16 * i for i in range(1200)], 20000)
     if name == "interleave":
         out = []
         for i in range(1000):
-            out.append(1000 + i)
-            out.append(5000 + i)
+            out.append((1000 + i, 1, i))
+            out.append((5000 + i, 2, i))
         return out
+    if name == "files2":
+        return _files([(1, 1000), (2, 5000)], 1000, 8)
+    if name == "files2x1":
+        return _files([(1, 2000), (2, 9000)], 1200, 1)
+    if name == "files3":
+        return _files([(1, 3000), (2, 8000), (3, 15000)], 700, 4)
+    if name == "files2_far":
+        return _files([(1, 30000), (2, 60000)], 900, 16)
     if name == "mixed":
         out = list(range(200, 1000))
         out += [2000 + 8 * i for i in range(400)]
@@ -367,7 +451,7 @@ def synthetic(name):
             out.append(100 + i)
             out.append(9000 + i)
         out += list(range(300, 1100))
-        return out
+        return _one_file(out, 200)
     if name == "zipf":
         import random
         rng = random.Random(42)
@@ -378,7 +462,7 @@ def synthetic(name):
                 out.append(rng.choice(hot))
             else:
                 out.append(2000 + (i % 700))
-        return out
+        return _one_file(out, 500)
     raise SystemExit(f"unknown synthetic workload: {name}")
 
 

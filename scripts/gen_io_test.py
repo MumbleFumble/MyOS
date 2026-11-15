@@ -14,7 +14,7 @@ SIZE = 1024 * 1024
 
 def main():
     out_path = sys.argv[1] if len(sys.argv) > 1 else "build/io_test.bin"
-    state = 0x12345678
+    state = int(sys.argv[2], 0) if len(sys.argv) > 2 else 0x12345678
     buf = bytearray(SIZE)
     for i in range(SIZE):
         state ^= (state << 13) & 0xFFFFFFFF

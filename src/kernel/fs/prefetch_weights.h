@@ -3,13 +3,16 @@
 #pragma once
 
 #define PW_BIAS               -1536
-#define PW_IS_NEXT            154
-#define PW_STRIDE_CONFIRMED   1536
-#define PW_STRIDE_UNCONF      -205
+#define PW_IS_NEXT            410
+#define PW_STRIDE_CONFIRMED   1024
+#define PW_STRIDE_UNCONF      307
 #define PW_SEQ_RUN            307
 #define PW_DIST               205
-#define PW_RECENT_ACC         1024
-#define PW_REUSE              1229
-#define PW_JUMP               -307
+#define PW_RECENT_ACC         512
+#define PW_REUSE              1485
+#define PW_JUMP               205
 #define PW_STREAM_CONT        1229
+#define PW_FILE_SEQ           1229
+#define PW_FILE_SEQ_OTHER     1741
+#define PW_FILE_STRIDE        1024
 #define PW_THRESHOLD         0

@@ -1,12 +1,15 @@
 # Learned prefetch weights, trained by train_prefetch.py
 bias = -1.5
-is_next = 0.15
-stride_confirmed = 1.5
-stride_unconf = -0.2
+is_next = 0.4
+stride_confirmed = 1.0
+stride_unconf = 0.3
 seq_run = 0.3
 dist = 0.2
-recent_acc = 1.0
-reuse = 1.2
-jump = -0.3
+recent_acc = 0.5
+reuse = 1.45
+jump = 0.2
 stream_cont = 1.2
+file_seq = 1.2
+file_seq_other = 1.7
+file_stride = 1.0
 threshold = 0.0

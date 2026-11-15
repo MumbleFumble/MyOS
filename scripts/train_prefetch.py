@@ -27,15 +27,15 @@ import sim_prefetch as sp
 
 def heldout(name):
     if name == "interleave3":
-        # Three interleaved sequential streams, unseen bases.
+        # Three interleaved sequential streams (as files), unseen bases.
         out = []
         for i in range(700):
-            out.append(3000 + i)
-            out.append(8000 + i)
-            out.append(15000 + i)
+            out.append((3000 + i, 1, i))
+            out.append((8000 + i, 2, i))
+            out.append((15000 + i, 3, i))
         return out
     if name == "stride7":
-        return [400 + 7 * i for i in range(1800)]
+        return sp._one_file([400 + 7 * i for i in range(1800)], 400)
     if name == "mixed2":
         # Different phase order: stride first, then interleave, then seq.
         out = [5000 + 8 * i for i in range(400)]
@@ -43,14 +43,16 @@ def heldout(name):
             out.append(700 + i)
             out.append(12000 + i)
         out += list(range(2000, 2900))
-        return out
+        return sp._one_file(out, 700)
     if name == "seq_far":
-        return list(range(40000, 42000))
+        return sp._one_file(range(40000, 42000), 40000)
+    if name in ("files3", "files2_far"):
+        return sp.synthetic(name)
     raise SystemExit(name)
 
 
-TRAIN = ["seq", "stride", "stride3", "stride16", "interleave", "mixed", "zipf"]
-HELDOUT = ["interleave3", "stride7", "mixed2", "seq_far"]
+TRAIN = ["seq", "stride", "stride3", "stride16", "interleave", "mixed", "zipf", "files2", "files2x1"]
+HELDOUT = ["interleave3", "stride7", "mixed2", "seq_far", "files3", "files2_far"]
 
 # Starting point: the best weights from the first training run (uniform
 # strides only). The ratio objective below refines from here.
@@ -65,6 +67,9 @@ INIT = {
     "reuse": 0.95,
     "jump": -0.3,
     "stream_cont": 1.2,
+    "file_seq": 1.2,
+    "file_seq_other": 1.2,
+    "file_stride": 1.0,
 }
 
 
