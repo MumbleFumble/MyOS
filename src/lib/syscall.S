@@ -154,6 +154,12 @@ sys_bcache_sync:
     mov  rax, 25        /* SYS_BCACHE_SYNC */
     int  0x80
     ret
+/* long sys_fcreate(const char *path) */
+.global sys_fcreate
+sys_fcreate:
+    mov  rax, 26        /* SYS_FCREATE */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy

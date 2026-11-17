@@ -7,6 +7,8 @@ int diskfs_mount(void);
 
 /* Open a file from the disk filesystem. Returns NULL if not found. */
 vfs_node_t *diskfs_open(const char *name);
+/* Create (or truncate) a file and open it (Phase 6 inc.3). */
+vfs_node_t *diskfs_create(const char *name);
 
 /* Enumerate disk filesystem files by index. Returns 0 or -1. */
 int diskfs_readdir(uint32_t index, char name_out[VFS_NAME_MAX]);

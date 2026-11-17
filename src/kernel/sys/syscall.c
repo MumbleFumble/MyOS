@@ -41,6 +41,16 @@ static void serial_write(const char *buf, uint64_t len)
 /* SYS_WRITE: write(fd, buf, count) */
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
 {
+    /* File fd (Phase 6 inc.3): route to the VFS write op. */
+    if (fd >= 3 && fd < MAX_FDS) {
+        struct task *t = sched_current_task();
+        struct vfs_node *node = (struct vfs_node *)t->fds[fd].node;
+        if (!node) return -1;
+        int64_t w = vfs_write(node, t->fds[fd].offset, count,
+                              (uint8_t *)buf);
+        if (w > 0) t->fds[fd].offset += (uint64_t)w;
+        return w;
+    }
     if (fd != FD_STDOUT && fd != FD_STDERR)
         return -1;
     if (count == 0)
@@ -187,14 +197,8 @@ static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
     return (int64_t)child_pid;
 }
 
-/* SYS_OPEN: open(path) -> fd, or -1 on not-found / table full */
-static int64_t sys_open(uint64_t path_va)
+static int64_t fd_alloc(struct task *t, vfs_node_t *node)
 {
-    const char *path = (const char *)path_va;
-    vfs_node_t *node = vfs_open(path);
-    if (!node) return -1;
-
-    struct task *t = sched_current_task();
     for (int fd = 3; fd < MAX_FDS; fd++) {
         if (t->fds[fd].node == 0) {
             t->fds[fd].node   = node;
@@ -204,6 +208,25 @@ static int64_t sys_open(uint64_t path_va)
     }
     vfs_close(node);   /* no free slot */
     return -1;
+}
+
+/* SYS_OPEN: open(path) -> fd, or -1 on not-found / table full */
+static int64_t sys_open(uint64_t path_va)
+{
+    const char *path = (const char *)path_va;
+    vfs_node_t *node = vfs_open(path);
+    if (!node) return -1;
+    return fd_alloc(sched_current_task(), node);
+}
+
+/* SYS_FCREATE: fcreate(path) -> fd (Phase 6 inc.3). Creates the
+ * file if needed, truncates it if it exists. */
+static int64_t sys_fcreate(uint64_t path_va)
+{
+    const char *path = (const char *)path_va;
+    vfs_node_t *node = vfs_create(path);
+    if (!node) return -1;
+    return fd_alloc(sched_current_task(), node);
 }
 
 /* SYS_CLOSE: close(fd) -> 0 or -1 */
@@ -421,6 +444,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_WAIT:    return sys_wait(arg1);
     case SYS_EXEC:    return sys_exec(arg1, arg2);
     case SYS_OPEN:    return sys_open(arg1);
+    case SYS_FCREATE: return sys_fcreate(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

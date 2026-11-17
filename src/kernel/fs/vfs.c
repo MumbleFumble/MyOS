@@ -22,6 +22,19 @@ int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t *buf)
     return node->ops->read(node, offset, len, buf);
 }
 
+int64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t *buf)
+{
+    if (!node || !node->ops || !node->ops->write) return -1;
+    return node->ops->write(node, offset, len, buf);
+}
+
+vfs_node_t *vfs_create(const char *path)
+{
+    if (path[0] == '/') path++;
+    /* Only diskfs is writable; ramfs holds in-kernel blobs. */
+    return diskfs_create(path);
+}
+
 void vfs_close(vfs_node_t *node)
 {
     if (!node) return;

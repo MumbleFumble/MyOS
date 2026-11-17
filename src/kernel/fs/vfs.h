@@ -18,6 +18,9 @@ typedef struct {
      * Writes null-terminated name into name_out[VFS_NAME_MAX].
      * Returns 0 on success, -1 if index out of range. */
     int     (*readdir)(vfs_node_t *dir, uint32_t index, char name_out[VFS_NAME_MAX]);
+    /* Write len bytes at offset (Phase 6 inc.3). May be NULL for
+     * read-only filesystems. Returns bytes written or negative. */
+    int64_t (*write)  (vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t *buf);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -42,6 +45,10 @@ void vfs_init(void);
  */
 vfs_node_t *vfs_open   (const char *path);
 int64_t     vfs_read   (vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t *buf);
+int64_t     vfs_write  (vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t *buf);
+/* Create (or truncate) a file on the writable filesystem (diskfs).
+ * Returns a kmalloc'd node or NULL. */
+vfs_node_t *vfs_create (const char *path);
 void        vfs_close  (vfs_node_t *node);
 
 /*

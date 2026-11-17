@@ -233,6 +233,60 @@ static void cmd_dmastat(void)
     puts_u("\r\n");
 }
 
+/* write <file> <text>: create/truncate a disk file with text + LF.
+ * append <file> <text>: read-modify-write in the shell (no seek). */
+static char fbuf[4096];
+
+static int split_name_text(const char *arg, char *name_out,
+                            const char **text_out)
+{
+    int ni = 0;
+    while (arg[ni] && arg[ni] != ' ' && ni < 63) {
+        name_out[ni] = arg[ni]; ni++;
+    }
+    name_out[ni] = 0;
+    const char *t = arg + ni;
+    while (*t == ' ') t++;
+    *text_out = t;
+    return ni > 0;
+}
+
+static long slen_u(const char *s) { long n = 0; while (s[n]) n++; return n; }
+
+static void cmd_write(const char *arg)
+{
+    char name[64]; const char *text;
+    if (!split_name_text(arg, name, &text)) {
+        puts_u("usage: write <file> <text>\r\n"); return;
+    }
+    long fd = sys_fcreate(name);
+    if (fd < 0) { puts_u("write: failed\r\n"); return; }
+    sys_write(fd, text, slen_u(text));
+    sys_write(fd, "\n", 1);
+    sys_close(fd);
+    puts_u("written\r\n");
+}
+
+static void cmd_append(const char *arg)
+{
+    char name[64]; const char *text;
+    if (!split_name_text(arg, name, &text)) {
+        puts_u("usage: append <file> <text>\r\n"); return;
+    }
+    long fd = sys_open(name);
+    if (fd < 0) { puts_u("append: no such file\r\n"); return; }
+    long n = sys_read(fd, fbuf, (long)sizeof(fbuf) - 1);
+    sys_close(fd);
+    if (n < 0) n = 0;
+    fd = sys_fcreate(name);
+    if (fd < 0) { puts_u("append: failed\r\n"); return; }
+    if (n) sys_write(fd, fbuf, n);
+    sys_write(fd, text, slen_u(text));
+    sys_write(fd, "\n", 1);
+    sys_close(fd);
+    puts_u("appended\r\n");
+}
+
 /* Flush dirty cache entries to disk. */
 static void cmd_sync(void)
 {
@@ -384,6 +438,8 @@ void _start(long argc, char **argv)
         if (streq(cmd, "dmastat")) { cmd_dmastat(); puts_u("> "); continue; }
         if (streq(cmd, "wstat")) { cmd_wstat(); puts_u("> "); continue; }
         if (streq(cmd, "sync")) { cmd_sync(); puts_u("> "); continue; }
+        if (streq(cmd, "write")) { cmd_write(arg); puts_u("> "); continue; }
+        if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
             if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
@@ -462,7 +518,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

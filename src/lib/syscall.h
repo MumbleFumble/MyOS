@@ -125,6 +125,7 @@ typedef struct {
 long sys_io_drain(io_record_t *buf, long max_records);
 long sys_bcache_stat(unsigned long *hits, unsigned long *misses, unsigned long *dirty);
 long sys_bcache_sync(void);
+long sys_fcreate(const char *path);
 long sys_dma_stat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_wstat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_raw_sector(unsigned long idx, void *buf, long is_write);
