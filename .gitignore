@@ -13,3 +13,6 @@
 # OS
 .DS_Store
 Thumbs.db
+
+*.d
+scripts/__pycache__/

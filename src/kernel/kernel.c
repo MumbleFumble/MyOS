@@ -280,6 +280,8 @@ void kernel_main(struct multiboot_info *mb_info)
     }
 
     bcache_init();
+    ata_enable_irq();
+    serial_puts("[serial] ata irq-driven waits enabled\r\n");
 
     /* Mount disk filesystem (optional — continues if no ATA disk found) */
     {
@@ -307,7 +309,28 @@ void kernel_main(struct multiboot_info *mb_info)
 
     serial_puts("[serial] tasks created, entering idle loop\r\n");
 
-    /* Idle loop — the scheduler will preempt this and run the other tasks. */
-    for (;;)
+    /* Idle loop — the scheduler will preempt this and run the other tasks.
+     * IRQ handlers that wake a task (ATA I/O completion) set
+     * sched_resched_pending instead of calling sched_tick themselves;
+     * running the scheduler here, at the loop's top level, keeps wake
+     * latency at microseconds without nesting a switch inside an IRQ
+     * frame. hlt wakes on any interrupt, so the flag is seen at once. */
+    for (;;) {
+        /* sched_tick is not reentrant: a timer IRQ nesting inside this
+         * call (which runs with IF=1) interleaves two switch sequences
+         * on this stack and corrupts saved RSP/CR3 state. Run it with
+         * IF=0, exactly like the IRQ-context calls the design already
+         * relies on. The flag check is inside the cli window too, so a
+         * wake request can never be missed between check and hlt. */
+        __asm__ volatile("cli");
+        if (sched_resched_pending)
+            sched_tick((uint64_t)timer_ticks());
+        /* context_switch does not save/restore RFLAGS: a switch into
+         * this loop made from IRQ context (IF=0) would otherwise leave
+         * the hlt below running with interrupts off, halting the CPU
+         * for good. sti immediately before hlt is race-free (a pending
+         * IRQ is recognised only after the hlt executes, waking it). */
+        __asm__ volatile("sti");
         __asm__ volatile("hlt");
+    }
 }

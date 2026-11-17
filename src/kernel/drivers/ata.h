@@ -9,6 +9,12 @@ int ata_read(uint32_t lba, uint32_t count, uint8_t *buf);
 /* Returns 1 if a primary master ATA disk is detected, 0 otherwise. */
 int ata_detect(void);
 
+/* Phase 4 inc.1: switch sector waits from polling to IRQ14-driven
+ * blocking (the reading task sleeps until the drive signals DRQ).
+ * Call after irq_init() and sched_init(); polling remains the fallback
+ * for the idle task and whenever an interrupt is lost. */
+void ata_enable_irq(void);
+
 /* -----------------------------------------------------------------------
  * I/O telemetry (Phase 3, increment 1).
  *

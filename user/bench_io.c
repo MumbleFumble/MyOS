@@ -10,9 +10,9 @@
  * count) via SYS_TELEMETRY plus bytes read and a checksum so runs are
  * verifiable and comparable.
  *
- * NOTE: io_block_count stays 0 — the ATA driver uses polling PIO, so disk
- * reads never put the task to sleep. A blocking driver would make this
- * counter (and the benchmark's scheduler signature) far more interesting.
+ * NOTE: since Phase 4 the ATA driver waits on IRQ14, so a read that is
+ * not instantly ready puts the task to sleep (TASK_BLOCKED) and
+ * io_block_count counts those sleeps — expect roughly one per sector.
  *
  * Build: wired into the Makefile next to the other benchmarks; the ELF is
  * packed into disk.img by the `disk` target (io_test.bin is already there).

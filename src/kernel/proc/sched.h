@@ -24,6 +24,7 @@ typedef enum {
     TASK_RUNNING = 1,
     TASK_DEAD    = 2,
     TASK_WAITING = 3,   /* blocked in sched_wait_pid */
+    TASK_BLOCKED = 4,   /* blocked on I/O (sched_block_current_io) */
 } task_state_t;
 
 /*
@@ -64,7 +65,8 @@ struct task {
     uint64_t      total_ticks;          /* cumulative ticks this task has run */
     uint64_t      last_scheduled_tick;  /* tick when this task was last made RUNNING */
     uint64_t      wait_ticks;           /* cumulative ticks spent in TASK_WAITING */
-    uint64_t      wait_start_tick;      /* tick when this task entered TASK_WAITING */
+    uint64_t      wait_start_tick;      /* tick when this task entered TASK_WAITING/BLOCKED */
+    uint64_t      io_deadline_tick;     /* TASK_BLOCKED only: wake by this tick (0 = none) */
     uint64_t      syscall_count;        /* number of syscalls dispatched */
     uint64_t      io_block_count;       /* times blocked on I/O (incremented by fs layer) */
 };
@@ -149,6 +151,26 @@ struct task *sched_find_by_pid(uint32_t pid);
  * Returns the child's exit code, or -1 if no matching child exists.
  */
 int32_t sched_wait_pid(uint32_t pid);
+
+/*
+ * Block the calling task until sched_wake_io() is called on it (e.g. from
+ * an IRQ handler) or 'deadline_tick' passes, whichever comes first.
+ * Increments the task's io_block_count. Returns 1 if the task blocked,
+ * 0 if blocking was refused (the idle task never blocks) and the caller
+ * should poll instead.
+ */
+int sched_block_current_io(uint64_t deadline_tick);
+
+/* Wake a TASK_BLOCKED task. IRQ-safe: plain stores only, no switching. */
+void sched_wake_io(struct task *t);
+
+/* Set by IRQ handlers that woke a task and want it run promptly. The
+ * idle loop polls this flag and calls sched_tick from its top level:
+ * sched_tick is not reentrant, so IRQ handlers must never call it
+ * directly (nested switches corrupt saved stack pointers). Any
+ * sched_tick run clears the flag. */
+extern volatile int sched_resched_pending;
+void sched_request_resched(void);
 
 /* Low-level context switch (context_switch.S). */
 void context_switch(uint64_t *old_rsp, uint64_t new_rsp);

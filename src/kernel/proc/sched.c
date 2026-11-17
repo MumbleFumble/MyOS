@@ -35,7 +35,8 @@ static uint32_t rr_pick_next(uint32_t cur, const struct task *t,
     (void)tick;
     uint32_t next  = (cur + 1) % count;
     uint32_t tries = 0;
-    while ((t[next].state == TASK_DEAD || t[next].state == TASK_WAITING)
+    while ((t[next].state == TASK_DEAD || t[next].state == TASK_WAITING
+            || t[next].state == TASK_BLOCKED)
            && tries < count) {
         next = (next + 1) % count;
         tries++;
@@ -248,6 +249,39 @@ check:
     goto check;
 }
 
+int sched_block_current_io(uint64_t deadline_tick)
+{
+    if (current == 0)
+        return 0;   /* the idle task must never block */
+
+    tasks[current].state            = TASK_BLOCKED;
+    tasks[current].io_deadline_tick = deadline_tick;
+    tasks[current].wait_start_tick  = (uint64_t)timer_ticks();
+    tasks[current].io_block_count++;
+    __asm__ volatile("sti");
+    sched_tick((uint64_t)timer_ticks());
+    /* Resumed: woken by sched_wake_io() or by the deadline scan. */
+    return 1;
+}
+
+volatile int sched_resched_pending = 0;
+
+void sched_request_resched(void)
+{
+    sched_resched_pending = 1;
+}
+
+void sched_wake_io(struct task *t)
+{
+    if (!t || t->state != TASK_BLOCKED)
+        return;
+    uint64_t now = (uint64_t)timer_ticks();
+    if (t->wait_start_tick && now >= t->wait_start_tick)
+        t->wait_ticks += now - t->wait_start_tick;
+    t->io_deadline_tick = 0;
+    t->state = TASK_READY;
+}
+
 /*
  * Record one context switch into the trace ring.
  *
@@ -291,6 +325,22 @@ void sched_tick(uint64_t tick)
     if (task_count <= 1)
         return;
 
+    sched_resched_pending = 0;   /* any scheduler run satisfies requests */
+
+    /* Deadline wakeups for I/O-blocked tasks: if an IRQ never arrived,
+     * the waiter still wakes by its deadline and its caller falls back
+     * to polling, so a lost interrupt degrades reads instead of
+     * hanging them. */
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].io_deadline_tick
+            && tick >= tasks[i].io_deadline_tick) {
+            if (tasks[i].wait_start_tick && tick >= tasks[i].wait_start_tick)
+                tasks[i].wait_ticks += tick - tasks[i].wait_start_tick;
+            tasks[i].io_deadline_tick = 0;
+            tasks[i].state = TASK_READY;
+        }
+    }
+
     uint32_t old  = current;
     uint32_t next = active_policy->pick_next(current, tasks, task_count, tick);
 
@@ -313,11 +363,12 @@ void sched_tick(uint64_t tick)
      * without this guard sched_tick would immediately revive it as a zombie,
      * causing repeated preemptions inside sched_current_exit's hlt loop and
      * an eventual kernel-stack overflow. */
-    if (tasks[old].state != TASK_DEAD && tasks[old].state != TASK_WAITING)
+    if (tasks[old].state != TASK_DEAD && tasks[old].state != TASK_WAITING
+        && tasks[old].state != TASK_BLOCKED)
         tasks[old].state = TASK_READY;
 
     /* Start wait-time accounting if the task is now blocked. */
-    if (tasks[old].state == TASK_WAITING)
+    if (tasks[old].state == TASK_WAITING || tasks[old].state == TASK_BLOCKED)
         tasks[old].wait_start_tick = tick;
 
     tasks[next].state              = TASK_RUNNING;

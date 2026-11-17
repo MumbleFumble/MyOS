@@ -1,6 +1,8 @@
 #include "ata.h"
 #include "../arch/port_io.h"
 #include "../arch/timer.h"
+#include "../arch/irq.h"
+#include "../proc/sched.h"
 
 /* Primary ATA channel I/O ports */
 #define ATA_DATA        0x1F0
@@ -22,6 +24,8 @@
 /* Commands */
 #define ATA_CMD_READ_PIO 0x20
 
+static volatile int ata_irq_flag = 0;
+
 static void ata_delay400ns(void)
 {
     /* Read the alternate status port 4 times = ~400 ns delay */
@@ -41,10 +45,88 @@ static int ata_wait_drq(void)
     uint8_t status;
     do {
         status = inb(ATA_STATUS);
-        if (status & ATA_SR_ERR) return -1;
+        /* 0xFF is a transient float seen just after command issue (and
+         * around stale interrupts), not a drive error: keep waiting.
+         * Genuine errors come with DRDY set. */
+        if (status != 0xFF && (status & ATA_SR_ERR)) return -1;
         if (status & ATA_SR_DRQ) return 0;
     } while (--timeout);
     return -1;
+}
+
+/* -----------------------------------------------------------------------
+ * IRQ-driven sector waits (Phase 4, increment 1).
+ *
+ * With IRQ mode on, a task waiting for DRQ blocks (TASK_BLOCKED) until
+ * the IRQ14 handler wakes it, instead of spinning on the status port.
+ * Safety nets, in order: the scheduler wakes blocked tasks at a
+ * deadline (50 ticks) even if the interrupt is lost, and any doubt
+ * falls back to the bounded polling wait above. The idle task never
+ * blocks (sched_block_current_io refuses), so early-boot and mount
+ * reads keep polling.
+ * ----------------------------------------------------------------------- */
+static struct task *ata_waiter  = 0;    /* task blocked on DRQ, if any */
+static int ata_irq_mode = 0;
+
+static void ata_irq_handler(void)
+{
+    (void)inb(ATA_STATUS);   /* reading status clears INTRQ */
+    ata_irq_flag = 1;
+    if (ata_waiter && ata_waiter->state == TASK_BLOCKED) {
+        sched_wake_io(ata_waiter);
+        /* Never call sched_tick from here: it is not reentrant, and a
+         * switch nested inside IRQ/syscall frames corrupts saved stack
+         * pointers. The idle loop notices the request and reschedules
+         * from its top level within microseconds (hlt wakes on IRQ). */
+        sched_request_resched();
+    }
+}
+
+void ata_enable_irq(void)
+{
+    irq_install_handler(14, ata_irq_handler);
+    /* Unmask the cascade IRQ2 (master PIC) and IRQ14 (slave PIC). */
+    outb(0x21, (uint8_t)(inb(0x21) & ~(1 << 2)));
+    outb(0xA1, (uint8_t)(inb(0xA1) & ~(1 << 6)));
+    ata_irq_mode = 1;
+}
+
+/* Wait for DRQ for one sector, sleeping on IRQ14 when possible. */
+static int ata_wait_drq_sector(void)
+{
+    uint8_t st = inb(ATA_STATUS);
+    if (st != 0xFF && (st & ATA_SR_ERR)) return -1;
+    if (st & ATA_SR_DRQ) return 0;
+    if (!ata_irq_mode)
+        return ata_wait_drq();
+
+    /* cli across the check-and-block sequence closes the lost-wake
+     * race: the IRQ cannot fire between the status/flag check and the
+     * state becoming TASK_BLOCKED, and if it fires after the sti in
+     * sched_block_current_io but before the switch, the wake simply
+     * marks us READY and the switch treats us normally. */
+    __asm__ volatile("cli");
+    st = inb(ATA_STATUS);
+    if (st != 0xFF && (st & ATA_SR_ERR)) { __asm__ volatile("sti"); return -1; }
+    if (st & ATA_SR_DRQ) { __asm__ volatile("sti"); return 0; }
+    if (ata_irq_flag) {
+        /* The interrupt already arrived; DRQ should be imminent. */
+        __asm__ volatile("sti");
+        return ata_wait_drq();
+    }
+    ata_waiter = sched_current_task();
+    int blocked = sched_block_current_io((uint64_t)timer_ticks() + 50);
+    if (!blocked) {
+        /* Idle task: blocking refused, interrupts still off. */
+        __asm__ volatile("sti");
+        return ata_wait_drq();
+    }
+    /* Resumed via IRQ wake or deadline: re-check, else bounded poll. */
+    ata_irq_flag = 0;
+    st = inb(ATA_STATUS);
+    if (st != 0xFF && (st & ATA_SR_ERR)) return -1;
+    if (st & ATA_SR_DRQ) return 0;
+    return ata_wait_drq();
 }
 
 int ata_detect(void)
@@ -74,6 +156,7 @@ int ata_read(uint32_t lba, uint32_t count, uint8_t *buf)
     int result = ata_read_inner(lba, count, buf);
     uint64_t tsc_end = timer_tsc();
 
+    ata_waiter = 0;
     io_trace_record(lba, count, tsc_start, tsc_end, result);
     return result;
 }
@@ -150,9 +233,10 @@ static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf)
     outb(ATA_LBA_MID,    (uint8_t)((lba >> 8)  & 0xFF));
     outb(ATA_LBA_HI,     (uint8_t)((lba >> 16) & 0xFF));
     outb(ATA_COMMAND,    ATA_CMD_READ_PIO);
+    ata_irq_flag = 0;
 
     for (uint32_t s = 0; s < count; s++) {
-        if (ata_wait_drq() != 0) return -1;
+        if (ata_wait_drq_sector() != 0) return -1;
 
         /* Read 256 16-bit words = 512 bytes */
         uint16_t *dst = (uint16_t *)(buf + s * 512);
