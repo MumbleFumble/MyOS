@@ -232,6 +232,21 @@ static void cmd_dmastat(void)
     puts_u("\r\n");
 }
 
+/* ATA write-path stats: sectors written by DMA vs PIO. */
+static void cmd_wstat(void)
+{
+    char buf[24];
+    unsigned long dma = 0, err = 0, pio = 0;
+    if (sys_wstat(&dma, &err, &pio) != 0) {
+        puts_u("wstat: failed\r\n");
+        return;
+    }
+    puts_u("dma_write_sectors="); puts_u(itoa((long)dma, buf));
+    puts_u(" dma_write_errors="); puts_u(itoa((long)err, buf));
+    puts_u(" pio_write_sectors="); puts_u(itoa((long)pio, buf));
+    puts_u("\r\n");
+}
+
 /* I/O telemetry: drains the kernel I/O ring and prints records. */
 static void cmd_iotrace(void)
 {
@@ -356,6 +371,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "acctrace")) { cmd_acctrace(); puts_u("> "); continue; }
         if (streq(cmd, "bcachestat")) { cmd_bcachestat(); puts_u("> "); continue; }
         if (streq(cmd, "dmastat")) { cmd_dmastat(); puts_u("> "); continue; }
+        if (streq(cmd, "wstat")) { cmd_wstat(); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
             if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
@@ -434,7 +450,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

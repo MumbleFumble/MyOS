@@ -135,6 +135,20 @@ sys_dma_stat:
     int  0x80
     ret
 
+/* long sys_wstat(unsigned long *dma, unsigned long *err, unsigned long *pio) */
+.global sys_wstat
+sys_wstat:
+    mov  rax, 23        /* SYS_WSTAT */
+    int  0x80
+    ret
+
+/* long sys_raw_sector(unsigned long idx, void *buf, long is_write) */
+.global sys_raw_sector
+sys_raw_sector:
+    mov  rax, 24        /* SYS_RAW_SECTOR */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

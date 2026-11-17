@@ -6,6 +6,21 @@
  * Returns 0 on success, -1 if the drive is absent or a read error occurs. */
 int ata_read(uint32_t lba, uint32_t count, uint8_t *buf);
 
+/* Write `count` 512-byte sectors from `buf` starting at LBA `lba`
+ * (Phase 6 inc.1). Mirrors ata_read: ata_write() takes the disk
+ * mutex, ata_write_locked() is for callers already holding it. A
+ * FLUSH CACHE is issued before returning so a completed write is
+ * durable. Returns 0 on success, -1 on error. */
+int ata_write(uint32_t lba, uint32_t count, const uint8_t *buf);
+int ata_write_locked(uint32_t lba, uint32_t count, const uint8_t *buf);
+
+/* Total LBA28 sectors reported by IDENTIFY DEVICE (0 = unknown). */
+uint32_t ata_total_sectors(void);
+
+/* Write-path counters for SYS_WSTAT. */
+void ata_write_stats(uint64_t *dma_sectors, uint64_t *dma_errors,
+                     uint64_t *pio_sectors);
+
 /* Disk mutex (Phase 4 inc.2): serialises the single command channel
  * between demand readers and the prefetch worker. ata_read() takes it
  * internally; the worker takes it explicitly so it can re-check the

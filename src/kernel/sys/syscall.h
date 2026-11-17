@@ -25,6 +25,8 @@
 #define SYS_PREFETCH_POLICY 20  /* prefetch_policy(idx) -> 0/-1 */
 #define SYS_ACCESS_DRAIN 21  /* access_drain(buf, max) -> demand access records */
 #define SYS_DMA_STAT 22  /* dma_stat(dma_out, err_out, pio_out) */
+#define SYS_WSTAT 23  /* wstat(dma_out, err_out, pio_out) - write path */
+#define SYS_RAW_SECTOR 24  /* raw_sector(idx, buf, is_write) - scratch-area test hook */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

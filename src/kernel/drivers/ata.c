@@ -248,6 +248,18 @@ static uint16_t bm_base = 0;        /* bus-master I/O base, 0 = none */
 static int dma_ready = 0;
 static uint32_t prdt_phys = 0, bounce_phys = 0;
 static uint64_t stat_dma_sectors = 0, stat_dma_errors = 0, stat_pio_sectors = 0;
+static uint64_t stat_dma_writes = 0, stat_dma_write_errors = 0, stat_pio_writes = 0;
+static uint32_t ata_total = 0;   /* LBA28 sectors from IDENTIFY */
+
+uint32_t ata_total_sectors(void) { return ata_total; }
+
+void ata_write_stats(uint64_t *dma_sectors, uint64_t *dma_errors,
+                     uint64_t *pio_sectors)
+{
+    *dma_sectors = stat_dma_writes;
+    *dma_errors  = stat_dma_write_errors;
+    *pio_sectors = stat_pio_writes;
+}
 
 void ata_dma_stats(uint64_t *dma_sectors, uint64_t *dma_errors,
                    uint64_t *pio_sectors)
@@ -274,8 +286,26 @@ static void pci_write32(uint32_t bus, uint32_t dev, uint32_t fn, uint32_t off,
     outl(0xCFC, val);
 }
 
+/* IDENTIFY DEVICE: cache the LBA28 sector count (polled; runs
+ * before IRQ mode, from ata_dma_init). */
+static void ata_identify(void)
+{
+    outb(ATA_DRIVE_HEAD, 0xE0);
+    ata_delay400ns();
+    outb(ATA_SECT_COUNT, 0);
+    outb(ATA_LBA_LO, 0);
+    outb(ATA_LBA_MID, 0);
+    outb(ATA_LBA_HI, 0);
+    outb(ATA_COMMAND, 0xEC);
+    if (ata_wait_drq() != 0) return;
+    uint16_t id[256];
+    for (int i = 0; i < 256; i++) id[i] = inw(ATA_DATA);
+    ata_total = (uint32_t)id[60] | ((uint32_t)id[61] << 16);
+}
+
 void ata_dma_init(void)
 {
+    ata_identify();
     uint32_t fdev = 0, ffn = 0;
     for (uint32_t dev = 0; dev < 32 && !bm_base; dev++) {
         for (uint32_t fn = 0; fn < 8; fn++) {
@@ -507,6 +537,119 @@ static int ata_read_pio(uint32_t lba, uint32_t count, uint8_t *buf)
         stat_pio_sectors++;
     }
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Write path (Phase 6, increment 1): mirrors the read path exactly.
+ * WRITE PIO (0x30) per sector with DRQ waits, WRITE DMA (0xCA) through
+ * the same bounce buffer (direction bit clear: memory -> device),
+ * PIO fallback per sector, and a FLUSH CACHE at the end of each
+ * request so a completed write is durable.
+ * ----------------------------------------------------------------------- */
+#define ATA_CMD_WRITE_PIO 0x30
+#define ATA_CMD_WRITE_DMA 0xCA
+#define ATA_CMD_FLUSH     0xE7
+
+static int ata_write_pio(uint32_t lba, uint32_t count, const uint8_t *buf)
+{
+    if (count == 0) return 0;
+    if (ata_wait_not_busy() != 0) return -1;
+
+    outb(ATA_DRIVE_HEAD, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
+    ata_delay400ns();
+    outb(ATA_SECT_COUNT, (uint8_t)count);
+    outb(ATA_LBA_LO,  (uint8_t)(lba        & 0xFF));
+    outb(ATA_LBA_MID, (uint8_t)((lba >> 8)  & 0xFF));
+    outb(ATA_LBA_HI,  (uint8_t)((lba >> 16) & 0xFF));
+    ata_irq_flag = 0;
+    outb(ATA_COMMAND, ATA_CMD_WRITE_PIO);
+
+    for (uint32_t s = 0; s < count; s++) {
+        if (ata_wait_drq_sector() != 0) return -1;
+        const uint16_t *src = (const uint16_t *)(buf + s * 512);
+        for (int i = 0; i < 256; i++)
+            outw(ATA_DATA, src[i]);
+        stat_pio_writes++;
+    }
+    return 0;
+}
+
+static int ata_write_dma_sector(uint32_t lba, const uint8_t *src)
+{
+    if (ata_wait_not_busy() != 0) return -1;
+    for (int i = 0; i < 512; i++)
+        dma_bounce[i] = src[i];
+
+    outb(bm_base + BM_CMD, 0);
+    outb(bm_base + BM_STATUS, BM_ST_ERROR | BM_ST_IRQ);
+    dma_prdt[0].addr     = bounce_phys;
+    dma_prdt[0].size_eot = 512u | 0x80000000u;
+    outl(bm_base + BM_PRDT, prdt_phys);
+    outb(bm_base + BM_CMD, 0);   /* direction: memory -> device */
+
+    outb(ATA_DRIVE_HEAD, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
+    ata_delay400ns();
+    outb(ATA_SECT_COUNT, 1);
+    outb(ATA_LBA_LO,  (uint8_t)(lba        & 0xFF));
+    outb(ATA_LBA_MID, (uint8_t)((lba >> 8)  & 0xFF));
+    outb(ATA_LBA_HI,  (uint8_t)((lba >> 16) & 0xFF));
+    ata_irq_flag = 0;
+    outb(ATA_COMMAND, ATA_CMD_WRITE_DMA);
+    outb(bm_base + BM_CMD, BM_CMD_START);
+
+    int rc = ata_wait_dma();
+    outb(bm_base + BM_CMD, 0);
+    if (rc != 0) { stat_dma_write_errors++; return -1; }
+    stat_dma_writes++;
+    return 0;
+}
+
+static void ata_flush(void)
+{
+    if (ata_wait_not_busy() != 0) return;
+    outb(ATA_DRIVE_HEAD, 0xE0);
+    ata_delay400ns();
+    outb(ATA_COMMAND, ATA_CMD_FLUSH);
+    (void)ata_wait_not_busy();
+}
+
+static int ata_write_inner(uint32_t lba, uint32_t count, const uint8_t *buf)
+{
+    if (count == 0) return 0;
+    int rc;
+    if (!dma_ready || !ata_irq_mode) {
+        rc = ata_write_pio(lba, count, buf);
+    } else {
+        rc = 0;
+        for (uint32_t s = 0; s < count; s++) {
+            if (ata_write_dma_sector(lba + s, buf + s * 512) != 0) {
+                rc = ata_write_pio(lba + s, count - s, buf + s * 512);
+                break;
+            }
+        }
+    }
+    if (rc == 0)
+        ata_flush();
+    return rc;
+}
+
+int ata_write_locked(uint32_t lba, uint32_t count, const uint8_t *buf)
+{
+    uint64_t tsc_start = timer_tsc();
+    int result = ata_write_inner(lba, count, buf);
+    uint64_t tsc_end = timer_tsc();
+
+    ata_waiter = 0;
+    io_trace_record(lba, count, tsc_start, tsc_end, result);
+    return result;
+}
+
+int ata_write(uint32_t lba, uint32_t count, const uint8_t *buf)
+{
+    ata_lock();
+    int result = ata_write_locked(lba, count, buf);
+    ata_unlock();
+    return result;
 }
 
 /* Read dispatcher: DMA per sector while it works (IRQ mode only;

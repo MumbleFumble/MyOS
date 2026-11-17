@@ -48,6 +48,17 @@ def build_image(out_path: str, files: list[str]) -> None:
         print(f"  added {os.path.basename(path)} ({len(data)} bytes)")
 
     image = super_block + records
+    # Pad the image with zero sectors to a fixed total size. The tail
+    # is free space: MyFS appends (Phase 6 inc.3) grow into it, and the
+    # last 2048 sectors are the raw-sector test scratch area. Without
+    # the padding the image is exactly content-sized and its tail
+    # sectors are live file data.
+    TOTAL_SECTORS = 32768
+    content_sectors = len(image) // SECTOR_SIZE
+    assert content_sectors <= TOTAL_SECTORS - 2048, \
+        f"MyFS content ({content_sectors} sectors) leaves no free tail"
+    if content_sectors < TOTAL_SECTORS:
+        image += b'\x00' * ((TOTAL_SECTORS - content_sectors) * SECTOR_SIZE)
     with open(out_path, 'wb') as f:
         f.write(image)
     print(f"MyFS image: {out_path} ({len(image)} bytes, {len(image)//SECTOR_SIZE} sectors)")

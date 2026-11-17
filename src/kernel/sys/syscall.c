@@ -334,6 +334,37 @@ static int64_t sys_dma_stat(uint64_t dma_va, uint64_t err_va, uint64_t pio_va)
     return 0;
 }
 
+/* SYS_WSTAT: wstat(dma_va, err_va, pio_va)
+ * Writes ATA write-path counters to userspace. Returns 0 or -1. */
+static int64_t sys_wstat(uint64_t dma_va, uint64_t err_va, uint64_t pio_va)
+{
+    if (!dma_va || !err_va || !pio_va)
+        return -1;
+    uint64_t d, e, p;
+    ata_write_stats(&d, &e, &p);
+    *(uint64_t *)dma_va = d;
+    *(uint64_t *)err_va = e;
+    *(uint64_t *)pio_va = p;
+    return 0;
+}
+
+/* SYS_RAW_SECTOR: raw_sector(idx, buf_va, is_write) — driver test
+ * hook (Phase 6). Reads or writes ONE sector in a scratch area at
+ * the very end of the disk (the last 2048 sectors), far beyond the
+ * MyFS image, so tests can exercise ata_read/ata_write (later the
+ * block cache) without endangering filesystem data. Returns 0/-1. */
+#define RAW_SCRATCH_SECTORS 2048
+static int64_t sys_raw_sector(uint64_t idx, uint64_t buf_va, uint64_t is_write)
+{
+    uint32_t total = ata_total_sectors();
+    if (!buf_va || total < 8192 || idx >= RAW_SCRATCH_SECTORS)
+        return -1;
+    uint32_t lba = total - RAW_SCRATCH_SECTORS + (uint32_t)idx;
+    if (is_write)
+        return ata_write(lba, 1, (const uint8_t *)buf_va);
+    return ata_read(lba, 1, (uint8_t *)buf_va);
+}
+
 /* SYS_PREFETCH_POLICY: prefetch_policy(index) -> 0 or -1.
  * Index 0 = none, 1 = sequential, 2 = stride, 3 = learned. */
 static int64_t sys_prefetch_policy(uint64_t index)
@@ -390,6 +421,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
     case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2);
     case SYS_DMA_STAT: return sys_dma_stat(arg1, arg2, arg3);
+    case SYS_WSTAT: return sys_wstat(arg1, arg2, arg3);
+    case SYS_RAW_SECTOR: return sys_raw_sector(arg1, arg2, arg3);
     case SYS_PREFETCH_POLICY: return sys_prefetch_policy(arg1);
     case SYS_ACCESS_DRAIN: return sys_access_drain(arg1, arg2);
 default:          return -1;  /* ENOSYS */
