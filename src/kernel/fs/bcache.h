@@ -39,6 +39,21 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data);
 /* Invalidate all entries (e.g., on unmount). */
 void bcache_invalidate(void);
 
+/* Async prefetch (Phase 4 inc.2): queue LBA for the prefetch worker
+ * instead of reading it synchronously. mru=1 inserts at the MRU end
+ * (learned policy), mru=0 at the LRU end (baselines). No-op if the
+ * block is already cached or already queued; drops (counted) when the
+ * queue is full. */
+void bcache_prefetch_enqueue(uint32_t lba, int mru);
+
+/* Queue counters: enqueued, dropped (queue full), completed reads. */
+void bcache_prefetch_stats(uint64_t *queued, uint64_t *dropped,
+                           uint64_t *done);
+
+/* Prefetch worker task body; created by kernel_main via task_create
+ * after ata_enable_irq(). */
+void bcache_prefetch_worker(void);
+
 /* Prefetch one block: read from disk and insert as prefetched.
  * No-op if already cached. Used by prefetch policies. */
 void bcache_prefetch(uint32_t lba);

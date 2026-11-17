@@ -5,8 +5,9 @@
  * Prefetch policy interface (Phase 3, increment 4).
  *
  * Policies observe cache accesses and issue prefetches. Called on every
- * bcache_read (hit or miss). The policy may call bcache_prefetch() to
- * speculatively load blocks.
+ * bcache_read (hit or miss). Since Phase 4 inc.2 the policy does not
+ * read the disk itself: it calls bcache_prefetch_enqueue() and a kernel
+ * worker task loads the block asynchronously.
  *
  * Baselines: none, sequential, stride. Oracle (perfect knowledge) is
  * evaluated offline in the simulator.

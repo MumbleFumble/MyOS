@@ -6,6 +6,16 @@
  * Returns 0 on success, -1 if the drive is absent or a read error occurs. */
 int ata_read(uint32_t lba, uint32_t count, uint8_t *buf);
 
+/* Disk mutex (Phase 4 inc.2): serialises the single command channel
+ * between demand readers and the prefetch worker. ata_read() takes it
+ * internally; the worker takes it explicitly so it can re-check the
+ * cache after acquiring it (a target that was in flight when queued
+ * is usually cached by the time the worker gets the disk). */
+void ata_lock(void);
+void ata_unlock(void);
+/* ata_read() body for callers already holding the disk mutex. */
+int ata_read_locked(uint32_t lba, uint32_t count, uint8_t *buf);
+
 /* Returns 1 if a primary master ATA disk is detected, 0 otherwise. */
 int ata_detect(void);
 

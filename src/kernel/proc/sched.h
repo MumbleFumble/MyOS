@@ -161,6 +161,14 @@ int32_t sched_wait_pid(uint32_t pid);
  */
 int sched_block_current_io(uint64_t deadline_tick);
 
+/*
+ * As sched_block_current_io, but does not count the block as I/O: the
+ * generic sleep behind the I/O wrapper, for kernel-internal waits
+ * (locks, work queues). Same contract: 1 if blocked, 0 if refused
+ * (idle task).
+ */
+int sched_block_current(uint64_t deadline_tick);
+
 /* Wake a TASK_BLOCKED task. IRQ-safe: plain stores only, no switching. */
 void sched_wake_io(struct task *t);
 

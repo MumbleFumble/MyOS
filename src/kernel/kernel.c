@@ -281,6 +281,7 @@ void kernel_main(struct multiboot_info *mb_info)
 
     bcache_init();
     ata_enable_irq();
+    task_create("prefetch", bcache_prefetch_worker);
     serial_puts("[serial] ata irq-driven waits enabled\r\n");
 
     /* Mount disk filesystem (optional — continues if no ATA disk found) */

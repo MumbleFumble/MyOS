@@ -184,6 +184,24 @@ uint32_t task_create(const char *name, void (*func)(void))
     return t->pid;
 }
 
+/*
+ * sched_tick() is not reentrant, and every voluntary call site used to
+ * run it with interrupts ON (sti immediately before the call): a timer
+ * IRQ landing inside the call interleaves a second switch sequence and
+ * corrupts saved stack pointers. The failure was latent for months
+ * because the window needs a nested pick that switches to a *specific*
+ * task; Phase 4's prefetch worker (blocking every few ticks) made it
+ * fire within seconds. Rule: sched_tick is only ever called with IF=0
+ * (IRQ gates already guarantee this; voluntary callers use this
+ * wrapper, which also re-enables interrupts for the resumed task).
+ */
+static void sched_tick_cli(void)
+{
+    __asm__ volatile("cli");
+    sched_tick((uint64_t)timer_ticks());
+    __asm__ volatile("sti");
+}
+
 void sched_current_exit(void)
 {
     tasks[current].state     = TASK_DEAD;
@@ -203,8 +221,7 @@ void sched_current_exit(void)
         }
     }
 
-    __asm__ volatile("sti");
-    sched_tick((uint64_t)timer_ticks());
+    sched_tick_cli();
     for (;;) __asm__ volatile("hlt");
 }
 
@@ -243,13 +260,12 @@ check:
 
     tasks[current].state    = TASK_WAITING;
     tasks[current].wait_pid = pid;
-    __asm__ volatile("sti");
-    sched_tick((uint64_t)timer_ticks());
+    sched_tick_cli();
     /* After being woken we are RUNNING again; re-check */
     goto check;
 }
 
-int sched_block_current_io(uint64_t deadline_tick)
+int sched_block_current(uint64_t deadline_tick)
 {
     if (current == 0)
         return 0;   /* the idle task must never block */
@@ -257,11 +273,18 @@ int sched_block_current_io(uint64_t deadline_tick)
     tasks[current].state            = TASK_BLOCKED;
     tasks[current].io_deadline_tick = deadline_tick;
     tasks[current].wait_start_tick  = (uint64_t)timer_ticks();
-    tasks[current].io_block_count++;
-    __asm__ volatile("sti");
-    sched_tick((uint64_t)timer_ticks());
+    sched_tick_cli();
     /* Resumed: woken by sched_wake_io() or by the deadline scan. */
     return 1;
+}
+
+int sched_block_current_io(uint64_t deadline_tick)
+{
+    if (current == 0)
+        return 0;   /* the idle task must never block */
+
+    tasks[current].io_block_count++;
+    return sched_block_current(deadline_tick);
 }
 
 volatile int sched_resched_pending = 0;

@@ -68,6 +68,91 @@ static int ata_wait_drq(void)
 static struct task *ata_waiter  = 0;    /* task blocked on DRQ, if any */
 static int ata_irq_mode = 0;
 
+/* -----------------------------------------------------------------------
+ * Disk mutex (Phase 4, increment 2).
+ *
+ * With the async prefetch worker there are now two concurrent readers
+ * (demand tasks and the worker), but the drive has one command channel
+ * and ata_waiter is a single slot: ata_read must be serialised. This is
+ * a sleep mutex with ownership handoff: unlock transfers ownership
+ * directly to the first waiter and wakes it. The wait deadline (200
+ * ticks) is only a backstop against a lost wake. Before IRQ mode is
+ * enabled (early boot, single-threaded) the lock is skipped entirely,
+ * so the idle task never has to wait for it.
+ * ----------------------------------------------------------------------- */
+#define ATA_LOCK_MAX_WAITERS 4
+static struct task *ata_lock_owner = 0;
+static struct task *ata_lock_waiters[ATA_LOCK_MAX_WAITERS];
+static int ata_lock_nwait = 0;
+
+void ata_lock(void)
+{
+    if (!ata_irq_mode)
+        return;
+    struct task *self = sched_current_task();
+    for (;;) {
+        uint64_t rflags;
+        __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+        __asm__ volatile("cli");
+        /* Drop any stale registration of ours (deadline-wake retry):
+         * being registered twice would strand ownership on us later. */
+        for (int i = 0; i < ata_lock_nwait; i++) {
+            if (ata_lock_waiters[i] == self) {
+                for (int j = i + 1; j < ata_lock_nwait; j++)
+                    ata_lock_waiters[j - 1] = ata_lock_waiters[j];
+                ata_lock_nwait--;
+                break;
+            }
+        }
+        if (!ata_lock_owner) {
+            ata_lock_owner = self;
+            if (rflags & 0x200) __asm__ volatile("sti");
+            return;
+        }
+        if (ata_lock_owner == self) {   /* re-entrant call: should not happen */
+            if (rflags & 0x200) __asm__ volatile("sti");
+            return;
+        }
+        if (ata_lock_nwait < ATA_LOCK_MAX_WAITERS)
+            ata_lock_waiters[ata_lock_nwait++] = self;
+        if (rflags & 0x200) __asm__ volatile("sti");
+        /* Sleep until unlock hands ownership to us (or the backstop
+         * deadline passes, in which case we loop and re-check). */
+        if (!sched_block_current((uint64_t)timer_ticks() + 200)) {
+            /* Idle task cannot block: spin. Only reachable if IRQ mode
+             * was enabled while a boot-context read races a task read;
+             * the holder always finishes, so this terminates. */
+            continue;
+        }
+        if (ata_lock_owner == self)
+            return;
+        /* Woken without ownership (deadline): loop and re-register. */
+    }
+}
+
+void ata_unlock(void)
+{
+    if (!ata_irq_mode)
+        return;
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("cli");
+    if (ata_lock_nwait > 0) {
+        /* Handoff: first waiter becomes owner before being woken, so
+         * no third task can slip in between. */
+        struct task *next = ata_lock_waiters[0];
+        for (int i = 1; i < ata_lock_nwait; i++)
+            ata_lock_waiters[i - 1] = ata_lock_waiters[i];
+        ata_lock_nwait--;
+        ata_lock_owner = next;
+        sched_wake_io(next);
+        sched_request_resched();
+    } else {
+        ata_lock_owner = 0;
+    }
+    if (rflags & 0x200) __asm__ volatile("sti");
+}
+
 static void ata_irq_handler(void)
 {
     (void)inb(ATA_STATUS);   /* reading status clears INTRQ */
@@ -150,7 +235,7 @@ static void io_trace_record(uint32_t lba, uint32_t count,
                             int result);
 static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf);
 
-int ata_read(uint32_t lba, uint32_t count, uint8_t *buf)
+int ata_read_locked(uint32_t lba, uint32_t count, uint8_t *buf)
 {
     uint64_t tsc_start = timer_tsc();
     int result = ata_read_inner(lba, count, buf);
@@ -158,6 +243,14 @@ int ata_read(uint32_t lba, uint32_t count, uint8_t *buf)
 
     ata_waiter = 0;
     io_trace_record(lba, count, tsc_start, tsc_end, result);
+    return result;
+}
+
+int ata_read(uint32_t lba, uint32_t count, uint8_t *buf)
+{
+    ata_lock();
+    int result = ata_read_locked(lba, count, buf);
+    ata_unlock();
     return result;
 }
 

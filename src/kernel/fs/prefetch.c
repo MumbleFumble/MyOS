@@ -64,7 +64,7 @@ static void seq_on_access(uint32_t lba, int hit, uint32_t file_id,
     if (seq_has_last && lba == seq_last_lba + 1) {
         /* Sequential: prefetch next 4 blocks. */
         for (uint32_t i = 1; i <= 4; i++)
-            bcache_prefetch(lba + i);
+            bcache_prefetch_enqueue(lba + i, 0);
     }
     seq_last_lba = lba;
     seq_has_last = 1;
@@ -99,7 +99,7 @@ static void stride_on_access(uint32_t lba, int hit, uint32_t file_id,
         if (s1 == s2 && s1 != 0) {
             /* Constant stride detected: prefetch next 4 along stride. */
             for (int i = 1; i <= 4; i++)
-                bcache_prefetch(lba + (uint32_t)(s2 * i));
+                bcache_prefetch_enqueue(lba + (uint32_t)(s2 * i), 0);
         }
     }
 }
@@ -290,7 +290,7 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
         }
 
         if (score > PW_THRESHOLD)
-            bcache_prefetch_mru(target);
+            bcache_prefetch_enqueue(target, 1);
     }
 
     /* Other files' continuations (file_seq_other). */
@@ -309,7 +309,7 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
             score += (PW_DIST * l_dist_fp(gap)) / 1024;
             score += (PW_RECENT_ACC * acc_fp) / 1024;
             if (score > PW_THRESHOLD)
-                bcache_prefetch_mru(target);
+                bcache_prefetch_enqueue(target, 1);
             others++;
         }
     }
