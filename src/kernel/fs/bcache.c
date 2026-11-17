@@ -136,6 +136,128 @@ static void bcache_touch(int idx)
     cache[idx].lru_seq = ++lru_clock;
 }
 
+/* -----------------------------------------------------------------------
+ * Write-back support (Phase 6, increment 2).
+ *
+ * Entries carry a dirty bit (reserved since Phase 3). Evicting a dirty
+ * entry must write it back first, or data is lost. All cache fills go
+ * through bcache_clean_victim(), which flushes LRU victims until the
+ * victim it returns is safe to overwrite. Callers must hold the ATA
+ * disk mutex: the only path that dirties entries (bcache_write) takes
+ * it too, so a victim cannot become dirty again between the flush and
+ * the fill.
+ * ----------------------------------------------------------------------- */
+static uint64_t stat_writebacks = 0;
+
+static int bcache_clean_victim(void)
+{
+    for (;;) {
+        uint64_t f = bcache_cli_save();
+        int v = bcache_victim();
+        if (!cache[v].valid || !cache[v].dirty) {
+            bcache_restore(f);
+            return v;
+        }
+        uint32_t vlba = cache[v].lba;
+        uint8_t vdata[512];
+        for (int i = 0; i < 512; i++)
+            vdata[i] = cache[v].data[i];
+        bcache_restore(f);
+        if (ata_write_locked(vlba, 1, vdata) != 0)
+            return -1;
+        stat_writebacks++;
+        f = bcache_cli_save();
+        int idx = bcache_lookup(vlba);
+        if (idx >= 0)
+            cache[idx].dirty = 0;
+        bcache_restore(f);
+    }
+}
+
+uint64_t bcache_writebacks(void) { return stat_writebacks; }
+
+uint64_t bcache_dirty_count(void)
+{
+    uint64_t f = bcache_cli_save();
+    uint64_t n = 0;
+    for (int i = 0; i < BCACHE_SIZE; i++)
+        if (cache[i].valid && cache[i].dirty)
+            n++;
+    bcache_restore(f);
+    return n;
+}
+
+/* Write one sector through the cache (write-back): the entry is
+ * updated/inserted and marked dirty; the data reaches disk on
+ * eviction or bcache_sync(). Returns 0 or -1. */
+int bcache_write(uint32_t lba, const uint8_t *data)
+{
+    ata_lock();
+    uint64_t f = bcache_cli_save();
+    int idx = bcache_lookup(lba);
+    if (idx >= 0) {
+        for (int i = 0; i < 512; i++)
+            cache[idx].data[i] = data[i];
+        cache[idx].dirty = 1;
+        cache[idx].prefetched_unused = 0;
+        bcache_touch(idx);
+        bcache_restore(f);
+        ata_unlock();
+        return 0;
+    }
+    bcache_restore(f);
+    if (bcache_clean_victim() < 0) {
+        ata_unlock();
+        return -1;
+    }
+    f = bcache_cli_save();
+    int v = bcache_victim();
+    if (cache[v].valid && cache[v].prefetched_unused)
+        prefetch_note_outcome(0);  /* prefetch evicted unused */
+    cache[v].lba = lba;
+    for (int i = 0; i < 512; i++)
+        cache[v].data[i] = data[i];
+    cache[v].valid = 1;
+    cache[v].prefetched_unused = 0;
+    cache[v].dirty = 1;
+    bcache_touch(v);
+    bcache_restore(f);
+    ata_unlock();
+    return 0;
+}
+
+/* Flush every dirty entry to disk. Returns 0, or -1 if any write
+ * failed (failed entries stay dirty). */
+int bcache_sync(void)
+{
+    ata_lock();
+    int rc = 0;
+    for (int i = 0; i < BCACHE_SIZE; i++) {
+        uint64_t f = bcache_cli_save();
+        int dirty = cache[i].valid && cache[i].dirty;
+        uint32_t lba = cache[i].lba;
+        uint8_t data[512];
+        if (dirty)
+            for (int j = 0; j < 512; j++)
+                data[j] = cache[i].data[j];
+        bcache_restore(f);
+        if (!dirty)
+            continue;
+        if (ata_write_locked(lba, 1, data) != 0) {
+            rc = -1;
+            continue;
+        }
+        stat_writebacks++;
+        f = bcache_cli_save();
+        int idx = bcache_lookup(lba);
+        if (idx >= 0)
+            cache[idx].dirty = 0;
+        bcache_restore(f);
+    }
+    ata_unlock();
+    return rc;
+}
+
 /* Shadow cache lookup. Returns 1 if hit, 0 if miss. */
 static int shadow_lookup(uint32_t lba)
 {
@@ -232,6 +354,10 @@ int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
         return -1;
     }
 
+    if (bcache_clean_victim() < 0) {
+        ata_unlock();
+        return -1;
+    }
     f = bcache_cli_save();
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
@@ -266,7 +392,9 @@ void bcache_prefetch(uint32_t lba)
     if (ata_read(lba, 1, tmp) != 0)
         return;  /* best-effort: ignore errors */
 
+    ata_lock();
     bcache_prefetch_insert(lba, tmp);
+    ata_unlock();
 }
 
 uint64_t bcache_pollution_misses(void) { return stat_pollution; }
@@ -282,6 +410,11 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data)
         return;
     }
 
+    bcache_restore(f);
+    if (bcache_clean_victim() < 0)
+        return;  /* write-back failed: skip this prefetch */
+    f = bcache_cli_save();
+    if (bcache_lookup(lba) >= 0) { bcache_restore(f); return; }
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
         prefetch_note_outcome(0);  /* prefetch evicted unused */
@@ -314,6 +447,11 @@ void bcache_prefetch_insert_mru(uint32_t lba, const uint8_t *data)
         return;
     }
 
+    bcache_restore(f);
+    if (bcache_clean_victim() < 0)
+        return;  /* write-back failed: skip this prefetch */
+    f = bcache_cli_save();
+    if (bcache_lookup(lba) >= 0) { bcache_restore(f); return; }
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
         prefetch_note_outcome(0);  /* prefetch evicted unused */
@@ -336,11 +474,15 @@ void bcache_prefetch_mru(uint32_t lba)
     if (ata_read(lba, 1, tmp) != 0)
         return;  /* best-effort: ignore errors */
 
+    ata_lock();
     bcache_prefetch_insert_mru(lba, tmp);
+    ata_unlock();
 }
 
 void bcache_invalidate(void)
 {
+    /* Dirty entries must reach disk before being dropped. */
+    bcache_sync();
     uint64_t f = bcache_cli_save();
     for (int i = 0; i < BCACHE_SIZE; i++)
         cache[i].valid = 0;

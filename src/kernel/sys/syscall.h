@@ -27,6 +27,7 @@
 #define SYS_DMA_STAT 22  /* dma_stat(dma_out, err_out, pio_out) */
 #define SYS_WSTAT 23  /* wstat(dma_out, err_out, pio_out) - write path */
 #define SYS_RAW_SECTOR 24  /* raw_sector(idx, buf, is_write) - scratch-area test hook */
+#define SYS_BCACHE_SYNC 25  /* bcache_sync() -> 0 or -1 */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

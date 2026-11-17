@@ -201,13 +201,14 @@ static void cmd_pftrace(void)
 static void cmd_bcachestat(void)
 {
     char buf[24];
-    unsigned long hits = 0, misses = 0;
-    if (sys_bcache_stat(&hits, &misses) != 0) {
+    unsigned long hits = 0, misses = 0, dirty = 0;
+    if (sys_bcache_stat(&hits, &misses, &dirty) != 0) {
         puts_u("bcachestat: failed\r\n");
         return;
     }
     puts_u("hits="); puts_u(itoa((long)hits, buf));
     puts_u(" misses="); puts_u(itoa((long)misses, buf));
+    puts_u(" dirty="); puts_u(itoa((long)dirty, buf));
     unsigned long total = hits + misses;
     if (total > 0) {
         /* hit rate as integer percent */
@@ -230,6 +231,16 @@ static void cmd_dmastat(void)
     puts_u(" dma_errors="); puts_u(itoa((long)err, buf));
     puts_u(" pio_sectors="); puts_u(itoa((long)pio, buf));
     puts_u("\r\n");
+}
+
+/* Flush dirty cache entries to disk. */
+static void cmd_sync(void)
+{
+    if (sys_bcache_sync() != 0) {
+        puts_u("sync: failed\r\n");
+        return;
+    }
+    puts_u("synced\r\n");
 }
 
 /* ATA write-path stats: sectors written by DMA vs PIO. */
@@ -372,6 +383,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "bcachestat")) { cmd_bcachestat(); puts_u("> "); continue; }
         if (streq(cmd, "dmastat")) { cmd_dmastat(); puts_u("> "); continue; }
         if (streq(cmd, "wstat")) { cmd_wstat(); puts_u("> "); continue; }
+        if (streq(cmd, "sync")) { cmd_sync(); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
             if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
@@ -450,7 +462,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

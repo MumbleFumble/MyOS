@@ -75,6 +75,9 @@ wait_for_count "wtest:" 1 120 || fail "wtest did not run"
 
 grep -a -q "wtest: write/readback OK" "$SERIAL" || fail "wtest verification failed"
 
+# Writes are write-back now (Phase 6 inc.2): flush before counting.
+printf '%s\n' "sync" | send_cmds
+sleep 2
 printf '%s\n' "wstat" | send_cmds
 wait_for_count "dma_write_sectors=" 2 60 || fail "wstat output missing"
 

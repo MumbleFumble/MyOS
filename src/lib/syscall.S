@@ -148,6 +148,12 @@ sys_raw_sector:
     mov  rax, 24        /* SYS_RAW_SECTOR */
     int  0x80
     ret
+/* long sys_bcache_sync(void) */
+.global sys_bcache_sync
+sys_bcache_sync:
+    mov  rax, 25        /* SYS_BCACHE_SYNC */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy

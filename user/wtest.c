@@ -45,9 +45,55 @@ static void fail(const char *what, long idx)
     puts_u("\r\n");
 }
 
+static void do_write(void)
+{
+    for (long i = 0; i < NSECT; i++) {
+        fill_pattern(i);
+        if (sys_raw_sector((unsigned long)i, wbuf, 1) != 0) {
+            fail("write", i);
+            sys_exit(1);
+        }
+    }
+}
+
+static void do_verify(void)
+{
+    for (long i = 0; i < NSECT; i++) {
+        fill_pattern(i);
+        if (sys_raw_sector((unsigned long)i, rbuf, 0) != 0) {
+            fail("read", i);
+            sys_exit(1);
+        }
+        for (long j = 0; j < 512; j++) {
+            if (rbuf[j] != wbuf[j]) {
+                fail("verify", i);
+                sys_exit(1);
+            }
+        }
+    }
+}
+
+/* Build modes (Phase 6 inc.2), selected with -DWTEST_MODE because
+ * exec passes no argv in MyOS: wtest.elf = 0 (write + readback),
+ * wtestw.elf = 1 (write only, leaves data dirty in the cache),
+ * wtestv.elf = 2 (verify only, ground truth after a reboot). */
+#ifndef WTEST_MODE
+#define WTEST_MODE 0
+#endif
+
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;
+    if (WTEST_MODE == 1) {
+        do_write();
+        puts_u("wtest: written (no sync)\r\n");
+        sys_exit(0);
+    }
+    if (WTEST_MODE == 2) {
+        do_verify();
+        puts_u("wtest: verify OK\r\n");
+        sys_exit(0);
+    }
     for (long i = 0; i < NSECT; i++) {
         fill_pattern(i);
         if (sys_raw_sector((unsigned long)i, wbuf, 1) != 0) {

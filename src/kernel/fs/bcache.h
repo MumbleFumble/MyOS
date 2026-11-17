@@ -32,7 +32,22 @@ int bcache_read(uint32_t lba, uint8_t *buf);
 int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
                     uint32_t file_off);
 
+/* Write one sector through the cache (Phase 6 inc.2, write-back):
+ * the entry is updated or inserted and marked dirty; data reaches
+ * disk on eviction or bcache_sync(). Returns 0 or -1. */
+int bcache_write(uint32_t lba, const uint8_t *data);
+
+/* Flush every dirty entry to disk. 0 on success, -1 if any write
+ * failed (failed entries stay dirty). */
+int bcache_sync(void);
+
+/* Dirty entries currently held, and entries written back so far. */
+uint64_t bcache_dirty_count(void);
+uint64_t bcache_writebacks(void);
+
 /* Insert a block into the cache, marked as prefetched (prefetched_unused=1).
+ * Caller must hold the ATA disk mutex (evicting a dirty victim
+ * writes it back).
  * Used by the prefetch policy. Evicts LRU entry if full. */
 void bcache_prefetch_insert(uint32_t lba, const uint8_t *data);
 

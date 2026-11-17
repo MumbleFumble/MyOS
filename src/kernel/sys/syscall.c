@@ -311,13 +311,22 @@ static int64_t sys_io_drain(uint64_t buf_va, uint64_t max_records)
 
 /* SYS_BCACHE_STAT: bcache_stat(hits_va, misses_va)
  * Writes cache hit/miss counters to userspace. Returns 0 or -1. */
-static int64_t sys_bcache_stat(uint64_t hits_va, uint64_t misses_va)
+static int64_t sys_bcache_stat(uint64_t hits_va, uint64_t misses_va,
+                               uint64_t dirty_va)
 {
     if (!hits_va || !misses_va)
         return -1;
     *(uint64_t *)hits_va = bcache_hits();
     *(uint64_t *)misses_va = bcache_misses();
+    if (dirty_va)
+        *(uint64_t *)dirty_va = bcache_dirty_count();
     return 0;
+}
+
+/* SYS_BCACHE_SYNC: flush all dirty cache entries to disk. */
+static int64_t sys_bcache_sync(void)
+{
+    return bcache_sync();
 }
 
 /* SYS_DMA_STAT: dma_stat(dma_va, err_va, pio_va)
@@ -360,9 +369,11 @@ static int64_t sys_raw_sector(uint64_t idx, uint64_t buf_va, uint64_t is_write)
     if (!buf_va || total < 8192 || idx >= RAW_SCRATCH_SECTORS)
         return -1;
     uint32_t lba = total - RAW_SCRATCH_SECTORS + (uint32_t)idx;
+    /* Phase 6 inc.2: route through the block cache, so the hook
+     * exercises bcache_write (write-back) / bcache_read. */
     if (is_write)
-        return ata_write(lba, 1, (const uint8_t *)buf_va);
-    return ata_read(lba, 1, (uint8_t *)buf_va);
+        return bcache_write(lba, (const uint8_t *)buf_va);
+    return bcache_read(lba, (uint8_t *)buf_va);
 }
 
 /* SYS_PREFETCH_POLICY: prefetch_policy(index) -> 0 or -1.
@@ -419,7 +430,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_PF_DRAIN: return sys_pf_drain(arg1, arg2);
     case SYS_PF_SETPOLICY: return sys_pf_setpolicy(arg1);
     case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
-    case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2);
+    case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2, arg3);
+    case SYS_BCACHE_SYNC: return sys_bcache_sync();
     case SYS_DMA_STAT: return sys_dma_stat(arg1, arg2, arg3);
     case SYS_WSTAT: return sys_wstat(arg1, arg2, arg3);
     case SYS_RAW_SECTOR: return sys_raw_sector(arg1, arg2, arg3);
