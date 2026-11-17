@@ -3,6 +3,7 @@
 #include "../arch/timer.h"
 #include "../arch/irq.h"
 #include "../proc/sched.h"
+#include "../mem/vmm.h"
 
 /* Primary ATA channel I/O ports */
 #define ATA_DATA        0x1F0
@@ -214,6 +215,174 @@ static int ata_wait_drq_sector(void)
     return ata_wait_drq();
 }
 
+/* -----------------------------------------------------------------------
+ * Bus-master DMA reads (Phase 5, increment 1).
+ *
+ * The PCI IDE controller's bus-master engine moves sectors straight
+ * into memory; the CPU only programs a one-entry PRDT pointing at a
+ * 512-byte bounce buffer, issues READ DMA (0xC8), and waits for the
+ * completion IRQ14 with the same block/wake machinery as PIO DRQ
+ * waits. Any failure (no BMIDE, timeout, error bits) falls back to
+ * the PIO path for the rest of the request, so DMA is purely an
+ * optimisation. Transfers go through the bounce buffer rather than
+ * the caller's buffer: caller buffers can straddle physical pages,
+ * and the bounce buffer is page-contained by construction, so its
+ * region can never cross the PRDT 64 KiB boundary rule.
+ * ----------------------------------------------------------------------- */
+#define ATA_CMD_READ_DMA 0xC8
+
+#define BM_CMD    0   /* bus-master command register (offset) */
+#define BM_STATUS 2   /* bus-master status register (offset) */
+#define BM_PRDT   4   /* PRDT address register (offset) */
+#define BM_CMD_START 0x01
+#define BM_CMD_READ  0x08   /* direction: device -> memory */
+#define BM_ST_ACTIVE 0x01
+#define BM_ST_ERROR  0x02
+#define BM_ST_IRQ    0x04
+
+struct prd { uint32_t addr; uint32_t size_eot; };
+static struct prd dma_prdt[1] __attribute__((aligned(16)));
+static uint8_t dma_bounce[512] __attribute__((aligned(512)));
+
+static uint16_t bm_base = 0;        /* bus-master I/O base, 0 = none */
+static int dma_ready = 0;
+static uint32_t prdt_phys = 0, bounce_phys = 0;
+static uint64_t stat_dma_sectors = 0, stat_dma_errors = 0, stat_pio_sectors = 0;
+
+void ata_dma_stats(uint64_t *dma_sectors, uint64_t *dma_errors,
+                   uint64_t *pio_sectors)
+{
+    *dma_sectors = stat_dma_sectors;
+    *dma_errors  = stat_dma_errors;
+    *pio_sectors = stat_pio_sectors;
+}
+
+static uint32_t pci_read32(uint32_t bus, uint32_t dev, uint32_t fn, uint32_t off)
+{
+    uint32_t addr = 0x80000000u | (bus << 16) | (dev << 11) | (fn << 8)
+                  | (off & 0xFC);
+    outl(0xCF8, addr);
+    return inl(0xCFC);
+}
+
+static void pci_write32(uint32_t bus, uint32_t dev, uint32_t fn, uint32_t off,
+                        uint32_t val)
+{
+    uint32_t addr = 0x80000000u | (bus << 16) | (dev << 11) | (fn << 8)
+                  | (off & 0xFC);
+    outl(0xCF8, addr);
+    outl(0xCFC, val);
+}
+
+void ata_dma_init(void)
+{
+    uint32_t fdev = 0, ffn = 0;
+    for (uint32_t dev = 0; dev < 32 && !bm_base; dev++) {
+        for (uint32_t fn = 0; fn < 8; fn++) {
+            uint32_t id = pci_read32(0, dev, fn, 0);
+            if ((id & 0xFFFF) == 0xFFFF) {
+                if (fn == 0) break;   /* no device at this slot */
+                continue;
+            }
+            uint32_t cls = pci_read32(0, dev, fn, 8);
+            if ((cls >> 16) != 0x0101)   /* class mass-storage, subclass IDE */
+                continue;
+            uint32_t bar4 = pci_read32(0, dev, fn, 0x20);
+            if ((bar4 & 1) && (bar4 & 0xFFFC)) {
+                bm_base = (uint16_t)(bar4 & 0xFFFC);
+                fdev = dev; ffn = fn;
+                break;
+            }
+        }
+    }
+    if (!bm_base)
+        return;
+    /* Enable I/O-space access and bus mastering on the controller. */
+    uint32_t cmd = pci_read32(0, fdev, ffn, 4);
+    if ((cmd & 0x5) != 0x5)
+        pci_write32(0, fdev, ffn, 4, cmd | 0x5);
+    uint64_t cr3 = vmm_current_cr3();
+    prdt_phys   = (uint32_t)vmm_virt_to_phys(cr3, (uint64_t)dma_prdt);
+    bounce_phys = (uint32_t)vmm_virt_to_phys(cr3, (uint64_t)dma_bounce);
+    if (!prdt_phys || !bounce_phys) {
+        bm_base = 0;
+        return;
+    }
+    dma_ready = 1;
+}
+
+static int dma_status_check(void)
+{
+    uint8_t bm = inb(bm_base + BM_STATUS);
+    if (bm & BM_ST_ERROR) return -1;
+    uint8_t st = inb(ATA_STATUS);
+    if (st != 0xFF && (st & ATA_SR_ERR)) return -1;
+    return (bm & BM_ST_IRQ) ? 0 : -1;
+}
+
+static int dma_poll(void)
+{
+    int timeout = 200000;
+    while (timeout--) {
+        if (!(inb(bm_base + BM_STATUS) & BM_ST_ACTIVE))
+            return dma_status_check();
+    }
+    return -1;
+}
+
+/* Wait for DMA completion, sleeping on IRQ14 when possible (the
+ * handler sets ata_irq_flag and wakes ata_waiter, exactly as for DRQ).
+ * The 50-tick deadline and the bounded poll are the safety nets. */
+static int ata_wait_dma(void)
+{
+    if (ata_irq_flag)
+        return dma_status_check();
+    if (!ata_irq_mode)
+        return dma_poll();
+
+    __asm__ volatile("cli");
+    if (ata_irq_flag) { __asm__ volatile("sti"); return dma_status_check(); }
+    ata_waiter = sched_current_task();
+    int blocked = sched_block_current_io((uint64_t)timer_ticks() + 50);
+    if (!blocked) {
+        __asm__ volatile("sti");
+        return dma_poll();
+    }
+    if (ata_irq_flag)
+        return dma_status_check();
+    return dma_poll();   /* deadline wake, no IRQ: one bounded poll */
+}
+
+static int ata_read_dma_sector(uint32_t lba, uint8_t *dst)
+{
+    if (ata_wait_not_busy() != 0) return -1;
+
+    outb(bm_base + BM_CMD, 0);                              /* stop */
+    outb(bm_base + BM_STATUS, BM_ST_ERROR | BM_ST_IRQ);     /* clear bits */
+    dma_prdt[0].addr     = bounce_phys;
+    dma_prdt[0].size_eot = 512u | 0x80000000u;              /* count + EOT */
+    outl(bm_base + BM_PRDT, prdt_phys);
+    outb(bm_base + BM_CMD, BM_CMD_READ);
+
+    outb(ATA_DRIVE_HEAD, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
+    ata_delay400ns();
+    outb(ATA_SECT_COUNT, 1);
+    outb(ATA_LBA_LO,  (uint8_t)(lba        & 0xFF));
+    outb(ATA_LBA_MID, (uint8_t)((lba >> 8)  & 0xFF));
+    outb(ATA_LBA_HI,  (uint8_t)((lba >> 16) & 0xFF));
+    ata_irq_flag = 0;
+    outb(ATA_COMMAND, ATA_CMD_READ_DMA);
+    outb(bm_base + BM_CMD, BM_CMD_READ | BM_CMD_START);
+
+    int rc = ata_wait_dma();
+    outb(bm_base + BM_CMD, 0);                              /* stop */
+    if (rc != 0) { stat_dma_errors++; return -1; }
+    for (int i = 0; i < 512; i++)
+        dst[i] = dma_bounce[i];
+    stat_dma_sectors++;
+    return 0;
+}
+
 int ata_detect(void)
 {
     /* Select drive 0 (master) with LBA mode */
@@ -311,7 +480,7 @@ int io_trace_drain(struct io_record *buf, int max)
     return (int)n;
 }
 
-static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf)
+static int ata_read_pio(uint32_t lba, uint32_t count, uint8_t *buf)
 {
     if (count == 0) return 0;
 
@@ -335,6 +504,22 @@ static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf)
         uint16_t *dst = (uint16_t *)(buf + s * 512);
         for (int i = 0; i < 256; i++)
             dst[i] = inw(ATA_DATA);
+        stat_pio_sectors++;
+    }
+    return 0;
+}
+
+/* Read dispatcher: DMA per sector while it works (IRQ mode only;
+ * boot/idle reads stay on PIO), PIO for the rest of the request after
+ * any DMA failure. */
+static int ata_read_inner(uint32_t lba, uint32_t count, uint8_t *buf)
+{
+    if (count == 0) return 0;
+    if (!dma_ready || !ata_irq_mode)
+        return ata_read_pio(lba, count, buf);
+    for (uint32_t s = 0; s < count; s++) {
+        if (ata_read_dma_sector(lba + s, buf + s * 512) != 0)
+            return ata_read_pio(lba + s, count - s, buf + s * 512);
     }
     return 0;
 }

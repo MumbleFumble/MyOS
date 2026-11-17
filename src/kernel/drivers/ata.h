@@ -25,6 +25,16 @@ int ata_detect(void);
  * for the idle task and whenever an interrupt is lost. */
 void ata_enable_irq(void);
 
+/* Phase 5 inc.1: find the PCI bus-master IDE controller and set up
+ * DMA reads (PRDT + bounce buffer). Safe to call when no BMIDE is
+ * present: the driver then stays on the PIO path. Call before
+ * ata_enable_irq(); DMA is only used once IRQ mode is on. */
+void ata_dma_init(void);
+
+/* DMA/PIO transfer counters for SYS_DMA_STAT. */
+void ata_dma_stats(uint64_t *dma_sectors, uint64_t *dma_errors,
+                   uint64_t *pio_sectors);
+
 /* -----------------------------------------------------------------------
  * I/O telemetry (Phase 3, increment 1).
  *

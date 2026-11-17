@@ -280,6 +280,7 @@ void kernel_main(struct multiboot_info *mb_info)
     }
 
     bcache_init();
+    ata_dma_init();
     ata_enable_irq();
     task_create("prefetch", bcache_prefetch_worker);
     serial_puts("[serial] ata irq-driven waits enabled\r\n");

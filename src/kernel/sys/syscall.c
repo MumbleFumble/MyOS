@@ -320,6 +320,20 @@ static int64_t sys_bcache_stat(uint64_t hits_va, uint64_t misses_va)
     return 0;
 }
 
+/* SYS_DMA_STAT: dma_stat(dma_va, err_va, pio_va)
+ * Writes ATA DMA/PIO transfer counters to userspace. Returns 0 or -1. */
+static int64_t sys_dma_stat(uint64_t dma_va, uint64_t err_va, uint64_t pio_va)
+{
+    if (!dma_va || !err_va || !pio_va)
+        return -1;
+    uint64_t d, e, p;
+    ata_dma_stats(&d, &e, &p);
+    *(uint64_t *)dma_va = d;
+    *(uint64_t *)err_va = e;
+    *(uint64_t *)pio_va = p;
+    return 0;
+}
+
 /* SYS_PREFETCH_POLICY: prefetch_policy(index) -> 0 or -1.
  * Index 0 = none, 1 = sequential, 2 = stride, 3 = learned. */
 static int64_t sys_prefetch_policy(uint64_t index)
@@ -375,6 +389,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_PF_SETPOLICY: return sys_pf_setpolicy(arg1);
     case SYS_IO_DRAIN: return sys_io_drain(arg1, arg2);
     case SYS_BCACHE_STAT: return sys_bcache_stat(arg1, arg2);
+    case SYS_DMA_STAT: return sys_dma_stat(arg1, arg2, arg3);
     case SYS_PREFETCH_POLICY: return sys_prefetch_policy(arg1);
     case SYS_ACCESS_DRAIN: return sys_access_drain(arg1, arg2);
 default:          return -1;  /* ENOSYS */

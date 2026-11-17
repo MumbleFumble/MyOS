@@ -128,6 +128,13 @@ sys_bcache_stat:
     int  0x80
     ret
 
+/* long sys_dma_stat(unsigned long *dma, unsigned long *err, unsigned long *pio) */
+.global sys_dma_stat
+sys_dma_stat:
+    mov  rax, 22        /* SYS_DMA_STAT */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

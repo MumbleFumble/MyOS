@@ -24,6 +24,7 @@
 #define SYS_BCACHE_STAT 19  /* bcache_stat(hits_out, misses_out) */
 #define SYS_PREFETCH_POLICY 20  /* prefetch_policy(idx) -> 0/-1 */
 #define SYS_ACCESS_DRAIN 21  /* access_drain(buf, max) -> demand access records */
+#define SYS_DMA_STAT 22  /* dma_stat(dma_out, err_out, pio_out) */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */
