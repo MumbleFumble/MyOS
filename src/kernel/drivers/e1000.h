@@ -17,9 +17,6 @@ int  e1000_send(const uint8_t *frame, uint16_t len);
  * *len_out, returns 1; returns 0 when the ring is empty. */
 int  e1000_recv(uint8_t *out, uint16_t *len_out);
 
-/* Kernel task body: drains the RX ring and logs frames to serial. */
-void e1000_rx_task(void);
-
 /* Send the fixed test frame (broadcast, ethertype 0x88B5). */
 int  e1000_send_hello(void);
 

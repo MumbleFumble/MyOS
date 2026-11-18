@@ -133,25 +133,6 @@ static void net_puthex(uint32_t v, int digits)
         net_putc(h[(v >> (i * 4)) & 0xF]);
 }
 
-static void net_log_frame(const uint8_t *f, uint16_t len)
-{
-    net_puts("[net] rx len=");
-    net_putu(len);
-    if (len >= 14) {
-        net_puts(" type=0x");
-        net_puthex(((uint32_t)f[12] << 8) | f[13], 4);
-        net_puts(" data=\"");
-        uint16_t n = len - 14;
-        if (n > 48) n = 48;
-        for (uint16_t i = 0; i < n; i++) {
-            uint8_t c = f[14 + i];
-            net_putc((c >= 32 && c < 127) ? (char)c : '.');
-        }
-        net_putc('"');
-    }
-    net_puts("\r\n");
-}
-
 /* EEPROM read via EERD (fallback MAC source). */
 static uint16_t eeprom_read(uint8_t addr)
 {
@@ -318,21 +299,6 @@ int e1000_recv(uint8_t *out, uint16_t *len_out)
     rx_next = (rx_next + 1) % RX_COUNT;
     stat_rx++;
     return 1;
-}
-
-void e1000_rx_task(void)
-{
-    uint8_t frame[RX_BUF_SIZE];
-    uint16_t len;
-    for (;;) {
-        int got = 0;
-        while (e1000_recv(frame, &len)) {
-            got = 1;
-            net_log_frame(frame, len);
-        }
-        if (!got)
-            sched_block_current((uint64_t)timer_ticks() + 2);
-    }
 }
 
 int e1000_send_hello(void)
