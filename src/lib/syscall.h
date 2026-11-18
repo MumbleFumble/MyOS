@@ -133,9 +133,16 @@ struct netstat_out {
     unsigned char link;
     unsigned long rx_frames;
     unsigned long tx_frames;
+    unsigned int arp_rx;
+    unsigned int arp_tx;
+    unsigned int icmp_rx;
+    unsigned int icmp_tx;
+    unsigned int udp_rx;
+    unsigned int udp_tx;
 };
 long sys_netstat(struct netstat_out *out);
 long sys_netsend(void);
+long sys_ping(const unsigned char *ip, unsigned short seq);
 long sys_dma_stat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_wstat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_raw_sector(unsigned long idx, void *buf, long is_write);

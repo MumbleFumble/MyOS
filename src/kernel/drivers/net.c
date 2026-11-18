@@ -1,10 +1,14 @@
-/* net.c — minimal ARP + IPv4 + ICMP echo stack (Phase 7 inc.2).
+/* net.c — minimal ARP + IPv4 + ICMP + UDP stack (Phase 7 inc.2/3).
  *
  * Sits on the e1000 driver's raw frame send/recv. The RX task polls
- * the ring and dispatches here: ARP requests for our address get a
- * reply (and every ARP packet teaches the cache), IPv4 packets to us
- * with protocol 1 get ICMP echo replies, anything else is logged to
- * serial like the inc.1 raw build did.
+ * the ring and dispatches here:
+ *  - ARP requests for our address get a reply; every ARP packet and
+ *    every IPv4 packet's sender teaches the ARP cache.
+ *  - ICMP echo requests get echo replies; echo replies are matched
+ *    against the one outstanding ping (net_ping_send) for RTT.
+ *  - UDP datagrams to port 7 are echoed back (payload unchanged).
+ *  - Anything else is logged to serial like the inc.1 raw build did.
+ * One outstanding ping at a time; the shell is the only client.
  */
 #include "net.h"
 #include "e1000.h"
@@ -16,6 +20,17 @@ static const uint8_t our_ip[4] = {192, 168, 77, 2};
 
 static uint32_t stat_arp_rx = 0, stat_arp_tx = 0;
 static uint32_t stat_icmp_rx = 0, stat_icmp_tx = 0;
+static uint32_t stat_udp_rx = 0, stat_udp_tx = 0;
+static uint16_t ip_id_counter = 1;
+
+/* Outstanding ping state (written by the pinging task, completed by
+ * the RX task when the echo reply lands). */
+static volatile int      ping_pending = 0;
+static volatile int      ping_received = 0;
+static uint16_t          ping_seq = 0;
+static uint32_t          ping_sent_tick = 0;
+static volatile uint32_t ping_recv_tick = 0;
+#define PING_ID 0x4D59   /* "MY" */
 
 /* ---- byte order helpers ---- */
 static uint16_t be16(const uint8_t *p)
@@ -184,7 +199,39 @@ static void arp_input(const uint8_t *f, uint16_t len)
     }
 }
 
-/* ---- IPv4 / ICMP ---- */
+/* ---- IPv4 send path (shared by ICMP + UDP) ---- */
+static int send_ipv4(const uint8_t *dst_mac, const uint8_t *dst_ip,
+                     uint8_t proto, const uint8_t *payload, uint16_t plen)
+{
+    static uint8_t f[2048];
+    if (14 + 20 + plen > (int)sizeof(f))
+        return -1;
+    uint8_t our_mac[6];
+    e1000_mac_addr(our_mac);
+    mac_copy(f, dst_mac);
+    mac_copy(f + 6, our_mac);
+    put_be16(f + 12, 0x0800);
+    uint8_t *ip = f + 14;
+    ip[0] = 0x45;
+    ip[1] = 0;
+    put_be16(ip + 2, (uint16_t)(20 + plen));
+    put_be16(ip + 4, ip_id_counter++);
+    put_be16(ip + 6, 0);
+    ip[8] = 64;
+    ip[9] = proto;
+    ip[10] = 0; ip[11] = 0;
+    ip_copy(ip + 12, our_ip);
+    ip_copy(ip + 16, dst_ip);
+    put_be16(ip + 10, cksum(ip, 20));
+    for (uint16_t i = 0; i < plen; i++)
+        ip[20 + i] = payload[i];
+    uint16_t frame_len = (uint16_t)(14 + 20 + plen);
+    if (frame_len < 60)
+        frame_len = 60;
+    return e1000_send(f, frame_len);
+}
+
+/* ---- ICMP ---- */
 static void icmp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
 {
     const uint8_t *ip = f + 14;
@@ -193,34 +240,99 @@ static void icmp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     uint32_t icmp_len = (uint32_t)ip_total - ihl;
     if (len < 14 + ihl + 8 || icmp_len < 8)
         return;
-    if (icmp[0] != 8)   /* echo request only */
+
+    if (icmp[0] == 0) {          /* echo reply: match the pending ping */
+        if (ping_pending && be16(icmp + 4) == PING_ID
+                          && be16(icmp + 6) == ping_seq) {
+            ping_recv_tick = timer_ticks();
+            ping_received = 1;
+            ping_pending = 0;
+        }
+        return;
+    }
+    if (icmp[0] != 8)            /* echo request only */
         return;
     stat_icmp_rx++;
 
-    static uint8_t out[14 + 2048 - 14];
-    uint8_t our_mac[6];
-    e1000_mac_addr(our_mac);
-    mac_copy(out, f + 6);            /* back to the requester */
-    mac_copy(out + 6, our_mac);
-    put_be16(out + 12, 0x0800);
-    uint8_t *oip = out + 14;
-    for (uint32_t i = 0; i < ip_total; i++)
-        oip[i] = ip[i];
-    ip_copy(oip + 12, our_ip);       /* src = us */
-    ip_copy(oip + 16, ip + 12);      /* dst = requester */
-    oip[8] = 64;                     /* TTL */
-    oip[10] = 0; oip[11] = 0;
-    put_be16(oip + 10, cksum(oip, ihl));
-    uint8_t *oicmp = oip + ihl;
-    oicmp[0] = 0;                    /* echo reply */
-    oicmp[2] = 0; oicmp[3] = 0;
-    put_be16(oicmp + 2, cksum(oicmp, icmp_len));
-    uint16_t frame_len = (uint16_t)(14 + ip_total);
-    if (frame_len < 60)
-        frame_len = 60;
-    if (e1000_send(out, frame_len) == 0) {
+    static uint8_t seg[2048 - 14 - 20];
+    if (icmp_len > sizeof(seg))
+        return;
+    for (uint32_t i = 0; i < icmp_len; i++)
+        seg[i] = icmp[i];
+    seg[0] = 0;                  /* echo reply */
+    seg[2] = 0; seg[3] = 0;
+    put_be16(seg + 2, cksum(seg, icmp_len));
+    if (send_ipv4(f + 6, ip + 12, 1, seg, (uint16_t)icmp_len) == 0) {
         stat_icmp_tx++;
         nputs("[net] icmp echo reply to ");
+        nputip(ip + 12);
+        nputs("\r\n");
+    }
+}
+
+int net_ping_send(const uint8_t ip[4], const uint8_t mac[6], uint16_t seq)
+{
+    static const char payload[] = "myos-ping-payload";
+    uint8_t seg[8 + sizeof(payload) - 1];
+    seg[0] = 8;                  /* echo request */
+    seg[1] = 0;
+    seg[2] = 0; seg[3] = 0;
+    put_be16(seg + 4, PING_ID);
+    put_be16(seg + 6, seq);
+    for (uint32_t i = 0; i < sizeof(payload) - 1; i++)
+        seg[8 + i] = (uint8_t)payload[i];
+    put_be16(seg + 2, cksum(seg, sizeof(seg)));
+    ping_seq = seq;
+    ping_received = 0;
+    ping_pending = 1;
+    ping_sent_tick = timer_ticks();
+    if (send_ipv4(mac, ip, 1, seg, (uint16_t)sizeof(seg)) != 0) {
+        ping_pending = 0;
+        return -1;
+    }
+    stat_icmp_tx++;
+    return 0;
+}
+
+int net_ping_result(uint32_t *rtt_ticks)
+{
+    if (ping_received) {
+        *rtt_ticks = ping_recv_tick - ping_sent_tick;
+        ping_received = 0;
+        return 1;
+    }
+    if (ping_pending)
+        return 0;
+    return -1;
+}
+
+/* ---- UDP: echo server on port 7 ---- */
+static void udp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
+{
+    const uint8_t *ip = f + 14;
+    uint32_t ihl = (uint32_t)(ip[0] & 0x0F) * 4;
+    const uint8_t *udp = ip + ihl;
+    uint32_t avail = (uint32_t)ip_total - ihl;
+    if (len < 14 + ihl + 8 || avail < 8)
+        return;
+    uint16_t ulen = be16(udp + 4);
+    if (ulen < 8 || ulen > avail)
+        return;
+    if (be16(udp + 2) != 7)      /* echo port only */
+        return;
+    stat_udp_rx++;
+
+    static uint8_t seg[2048 - 14 - 20];
+    if (ulen > sizeof(seg))
+        return;
+    for (uint32_t i = 0; i < ulen; i++)
+        seg[i] = udp[i];
+    put_be16(seg + 0, be16(udp + 2));   /* src = the echo port */
+    put_be16(seg + 2, be16(udp + 0));   /* dst = sender's port */
+    seg[6] = 0; seg[7] = 0;             /* checksum 0 (legal in IPv4) */
+    if (send_ipv4(f + 6, ip + 12, 17, seg, ulen) == 0) {
+        stat_udp_tx++;
+        nputs("[net] udp echo reply to ");
         nputip(ip + 12);
         nputs("\r\n");
     }
@@ -242,6 +354,8 @@ static void ipv4_input(const uint8_t *f, uint16_t len)
     arp_learn(ip + 12, f + 6);
     if (ip[9] == 1)
         icmp_input(f, len, total);
+    else if (ip[9] == 17)
+        udp_input(f, len, total);
 }
 
 void net_input(const uint8_t *f, uint16_t len)
@@ -273,10 +387,13 @@ void net_rx_task(void)
 }
 
 void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
-                     uint32_t *icmp_rx, uint32_t *icmp_tx)
+                     uint32_t *icmp_rx, uint32_t *icmp_tx,
+                     uint32_t *udp_rx, uint32_t *udp_tx)
 {
     *arp_rx = stat_arp_rx;
     *arp_tx = stat_arp_tx;
     *icmp_rx = stat_icmp_rx;
     *icmp_tx = stat_icmp_tx;
+    *udp_rx = stat_udp_rx;
+    *udp_tx = stat_udp_tx;
 }

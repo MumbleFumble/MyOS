@@ -259,12 +259,64 @@ static void cmd_netstat(void)
     puts_u(" rx="); puts_u(itoa((long)o.rx_frames, buf));
     puts_u(" tx="); puts_u(itoa((long)o.tx_frames, buf));
     puts_u("\r\n");
+    puts_u("arp rx="); puts_u(itoa((long)o.arp_rx, buf));
+    puts_u(" tx="); puts_u(itoa((long)o.arp_tx, buf));
+    puts_u(" icmp rx="); puts_u(itoa((long)o.icmp_rx, buf));
+    puts_u(" tx="); puts_u(itoa((long)o.icmp_tx, buf));
+    puts_u(" udp rx="); puts_u(itoa((long)o.udp_rx, buf));
+    puts_u(" tx="); puts_u(itoa((long)o.udp_tx, buf));
+    puts_u("\r\n");
 }
 
 static void cmd_netsend(void)
 {
     if (sys_netsend() != 0) { puts_u("netsend: failed\r\n"); return; }
     puts_u("netsent\r\n");
+}
+
+/* Parse "a.b.c.d" into ip[4]; 1 on success. */
+static int parse_ip(const char *s, unsigned char ip[4])
+{
+    for (int part = 0; part < 4; part++) {
+        if (*s < '0' || *s > '9') return 0;
+        int v = 0;
+        while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+        if (v > 255) return 0;
+        ip[part] = (unsigned char)v;
+        if (part < 3) { if (*s != '.') return 0; s++; }
+    }
+    return *s == 0;
+}
+
+static void print_ip(const unsigned char ip[4])
+{
+    char buf[32];
+    for (int i = 0; i < 4; i++) {
+        if (i) puts_u(".");
+        puts_u(itoa((long)ip[i], buf));
+    }
+}
+
+/* ping <ip>: four ICMP echo requests via SYS_PING. */
+static void cmd_ping(const char *arg)
+{
+    char buf[32];
+    unsigned char ip[4];
+    if (!parse_ip(arg, ip)) { puts_u("ping: bad address\r\n"); return; }
+    for (int seq = 1; seq <= 4; seq++) {
+        long r = sys_ping(ip, (unsigned short)seq);
+        if (r < 0) {
+            puts_u("ping: no reply seq=");
+            puts_u(itoa((long)seq, buf));
+            puts_u("\r\n");
+        } else {
+            puts_u("reply from ");
+            print_ip(ip);
+            puts_u(": seq="); puts_u(itoa((long)seq, buf));
+            puts_u(" time="); puts_u(itoa(r * 10, buf));
+            puts_u("ms\r\n");
+        }
+    }
 }
 
 /* write <file> <text>: create/truncate a disk file with text + LF.
@@ -475,6 +527,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "write")) { cmd_write(arg); puts_u("> "); continue; }
         if (streq(cmd, "netstat")) { cmd_netstat(); puts_u("> "); continue; }
         if (streq(cmd, "netsend")) { cmd_netsend(); puts_u("> "); continue; }
+        if (streq(cmd, "ping")) { cmd_ping(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -554,7 +607,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

@@ -15,6 +15,8 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/ata.h"
 #include "../drivers/e1000.h"
+#include "../drivers/net.h"
+#include "../arch/timer.h"
 #include "../fs/bcache.h"
 #include "../fs/prefetch.h"
 #include "../drivers/rtc.h"
@@ -354,6 +356,12 @@ struct netstat_out {
     uint8_t  link;
     uint64_t rx_frames;
     uint64_t tx_frames;
+    uint32_t arp_rx;
+    uint32_t arp_tx;
+    uint32_t icmp_rx;
+    uint32_t icmp_tx;
+    uint32_t udp_rx;
+    uint32_t udp_tx;
 };
 
 static int64_t sys_netstat(uint64_t out_va)
@@ -366,6 +374,8 @@ static int64_t sys_netstat(uint64_t out_va)
     o->mac[3] = o->mac[4] = o->mac[5] = 0;
     if (o->present) e1000_mac_addr(o->mac);
     e1000_stats(&o->rx_frames, &o->tx_frames);
+    net_stack_stats(&o->arp_rx, &o->arp_tx, &o->icmp_rx, &o->icmp_tx,
+                    &o->udp_rx, &o->udp_tx);
     return 0;
 }
 
@@ -373,6 +383,32 @@ static int64_t sys_netstat(uint64_t out_va)
 static int64_t sys_netsend(void)
 {
     return e1000_send_hello();
+}
+
+/* SYS_PING (Phase 7): resolve ARP if needed, send an ICMP echo
+ * request and block (in 100 ms slices) for the reply. Returns
+ * the round-trip time in timer ticks (10 ms each) or -1. */
+static int64_t sys_ping(uint64_t ip_va, uint64_t seq)
+{
+    if (!ip_va) return -1;
+    const uint8_t *ip = (const uint8_t *)ip_va;
+    uint8_t mac[6];
+    if (!net_arp_lookup(ip, mac)) {
+        net_arp_request(ip);
+        int found = 0;
+        for (int i = 0; i < 30 && !found; i++) {
+            sched_block_current((uint64_t)timer_ticks() + 10);
+            found = net_arp_lookup(ip, mac);
+        }
+        if (!found) return -1;
+    }
+    if (net_ping_send(ip, mac, (uint16_t)seq) != 0) return -1;
+    for (int i = 0; i < 30; i++) {
+        uint32_t rtt = 0;
+        if (net_ping_result(&rtt) == 1) return (int64_t)rtt;
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return -1;
 }
 
 /* SYS_BCACHE_SYNC: flush all dirty cache entries to disk. */
@@ -476,6 +512,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_FCREATE: return sys_fcreate(arg1);
     case SYS_NETSTAT: return sys_netstat(arg1);
     case SYS_NETSEND: return sys_netsend();
+    case SYS_PING: return sys_ping(arg1, arg2);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

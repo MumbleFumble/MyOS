@@ -173,6 +173,12 @@ sys_netsend:
     mov  rax, 28        /* SYS_NETSEND */
     int  0x80
     ret
+/* long sys_ping(const unsigned char *ip, unsigned short seq) */
+.global sys_ping
+sys_ping:
+    mov  rax, 29        /* SYS_PING */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
