@@ -5,6 +5,7 @@
 #include "arch/exceptions.h"
 #include "arch/timer.h"
 #include "drivers/ata.h"
+#include "drivers/e1000.h"
 #include "fs/bcache.h"
 #include "arch/port_io.h"
 #include "mem/multiboot.h"
@@ -284,6 +285,14 @@ void kernel_main(struct multiboot_info *mb_info)
     ata_enable_irq();
     task_create("prefetch", bcache_prefetch_worker);
     serial_puts("[serial] ata irq-driven waits enabled\r\n");
+
+    /* Network (Phase 7): optional e1000 NIC. Absence is fine. */
+    if (e1000_init() == 0) {
+        task_create("net", e1000_rx_task);
+        serial_puts("[serial] e1000 network up\r\n");
+    } else {
+        serial_puts("[serial] e1000: no NIC found\r\n");
+    }
 
     /* Mount disk filesystem (optional — continues if no ATA disk found) */
     {

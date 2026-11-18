@@ -233,6 +233,40 @@ static void cmd_dmastat(void)
     puts_u("\r\n");
 }
 
+/* Network status (Phase 7): MAC, link, frame counters. */
+static void puthex2(unsigned char v)
+{
+    static const char h[] = "0123456789abcdef";
+    char b[3];
+    b[0] = h[(v >> 4) & 0xF]; b[1] = h[v & 0xF]; b[2] = 0;
+    puts_u(b);
+}
+
+static void cmd_netstat(void)
+{
+    char buf[32];
+    struct netstat_out o;
+    if (sys_netstat(&o) != 0 || !o.present) {
+        puts_u("net: no NIC\r\n");
+        return;
+    }
+    puts_u("mac=");
+    for (int i = 0; i < 6; i++) {
+        if (i) puts_u(":");
+        puthex2(o.mac[i]);
+    }
+    puts_u(o.link ? " link=up" : " link=down");
+    puts_u(" rx="); puts_u(itoa((long)o.rx_frames, buf));
+    puts_u(" tx="); puts_u(itoa((long)o.tx_frames, buf));
+    puts_u("\r\n");
+}
+
+static void cmd_netsend(void)
+{
+    if (sys_netsend() != 0) { puts_u("netsend: failed\r\n"); return; }
+    puts_u("netsent\r\n");
+}
+
 /* write <file> <text>: create/truncate a disk file with text + LF.
  * append <file> <text>: read-modify-write in the shell (no seek). */
 static char fbuf[4096];
@@ -439,6 +473,8 @@ void _start(long argc, char **argv)
         if (streq(cmd, "wstat")) { cmd_wstat(); puts_u("> "); continue; }
         if (streq(cmd, "sync")) { cmd_sync(); puts_u("> "); continue; }
         if (streq(cmd, "write")) { cmd_write(arg); puts_u("> "); continue; }
+        if (streq(cmd, "netstat")) { cmd_netstat(); puts_u("> "); continue; }
+        if (streq(cmd, "netsend")) { cmd_netsend(); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -518,7 +554,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

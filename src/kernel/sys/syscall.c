@@ -14,6 +14,7 @@
 #include "../drivers/vga.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/ata.h"
+#include "../drivers/e1000.h"
 #include "../fs/bcache.h"
 #include "../fs/prefetch.h"
 #include "../drivers/rtc.h"
@@ -346,6 +347,34 @@ static int64_t sys_bcache_stat(uint64_t hits_va, uint64_t misses_va,
     return 0;
 }
 
+/* SYS_NETSTAT (Phase 7): fill the caller's netstat struct. */
+struct netstat_out {
+    uint8_t  mac[6];
+    uint8_t  present;
+    uint8_t  link;
+    uint64_t rx_frames;
+    uint64_t tx_frames;
+};
+
+static int64_t sys_netstat(uint64_t out_va)
+{
+    if (!out_va) return -1;
+    struct netstat_out *o = (struct netstat_out *)out_va;
+    o->present = (uint8_t)e1000_present();
+    o->link    = (uint8_t)e1000_link_up();
+    o->mac[0] = o->mac[1] = o->mac[2] = 0;
+    o->mac[3] = o->mac[4] = o->mac[5] = 0;
+    if (o->present) e1000_mac_addr(o->mac);
+    e1000_stats(&o->rx_frames, &o->tx_frames);
+    return 0;
+}
+
+/* SYS_NETSEND (Phase 7): send the fixed test frame. */
+static int64_t sys_netsend(void)
+{
+    return e1000_send_hello();
+}
+
 /* SYS_BCACHE_SYNC: flush all dirty cache entries to disk. */
 static int64_t sys_bcache_sync(void)
 {
@@ -445,6 +474,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_EXEC:    return sys_exec(arg1, arg2);
     case SYS_OPEN:    return sys_open(arg1);
     case SYS_FCREATE: return sys_fcreate(arg1);
+    case SYS_NETSTAT: return sys_netstat(arg1);
+    case SYS_NETSEND: return sys_netsend();
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

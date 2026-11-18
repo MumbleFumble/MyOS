@@ -160,6 +160,19 @@ sys_fcreate:
     mov  rax, 26        /* SYS_FCREATE */
     int  0x80
     ret
+/* long sys_netstat(struct netstat_out *out) */
+.global sys_netstat
+sys_netstat:
+    mov  rax, 27        /* SYS_NETSTAT */
+    int  0x80
+    ret
+
+/* long sys_netsend(void) */
+.global sys_netsend
+sys_netsend:
+    mov  rax, 28        /* SYS_NETSEND */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
