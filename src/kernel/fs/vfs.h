@@ -49,6 +49,9 @@ int64_t     vfs_write  (vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t
 /* Create (or truncate) a file on the writable filesystem (diskfs).
  * Returns a kmalloc'd node or NULL. */
 vfs_node_t *vfs_create (const char *path);
+/* Delete / rename a disk file (Phase 11). Return 0 or -1. */
+int         vfs_unlink (const char *path);
+int         vfs_rename (const char *old_path, const char *new_path);
 void        vfs_close  (vfs_node_t *node);
 
 /*

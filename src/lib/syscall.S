@@ -205,6 +205,19 @@ sys_pfweights:
     mov  rax, 33        /* SYS_PFWEIGHTS */
     int  0x80
     ret
+/* long sys_funlink(const char *path) */
+.global sys_funlink
+sys_funlink:
+    mov  rax, 34        /* SYS_FUNLINK */
+    int  0x80
+    ret
+
+/* long sys_frename(const char *old_path, const char *new_path) */
+.global sys_frename
+sys_frename:
+    mov  rax, 35        /* SYS_FRENAME */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy

@@ -28,6 +28,21 @@ int64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t len, uint8_t *buf)
     return node->ops->write(node, offset, len, buf);
 }
 
+int vfs_unlink(const char *path)
+{
+    if (!path) return -1;
+    if (path[0] == '/') path++;
+    return diskfs_delete(path);
+}
+
+int vfs_rename(const char *old_path, const char *new_path)
+{
+    if (!old_path || !new_path) return -1;
+    if (old_path[0] == '/') old_path++;
+    if (new_path[0] == '/') new_path++;
+    return diskfs_rename(old_path, new_path);
+}
+
 vfs_node_t *vfs_create(const char *path)
 {
     if (path[0] == '/') path++;

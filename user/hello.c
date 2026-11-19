@@ -640,6 +640,24 @@ static void cmd_pfweights(const char *arg)
     puts_u(" -"); puts_u(itoa((long)o.neg, buf));
     puts_u("\r\n");
 }
+/* rm <file>: delete a disk file. */
+static void cmd_rm(const char *arg)
+{
+    if (!arg[0]) { puts_u("usage: rm <file>\r\n"); return; }
+    puts_u(sys_funlink(arg) == 0 ? "rm: deleted\r\n" : "rm: failed\r\n");
+}
+
+/* mv <old> <new>: rename a disk file. */
+static void cmd_mv(const char *arg)
+{
+    char oldn[64];
+    int i = 0;
+    while (arg[i] && arg[i] != ' ' && i < 63) { oldn[i] = arg[i]; i++; }
+    oldn[i] = 0;
+    while (arg[i] == ' ') i++;
+    if (!oldn[0] || !arg[i]) { puts_u("usage: mv <old> <new>\r\n"); return; }
+    puts_u(sys_frename(oldn, arg + i) == 0 ? "mv: renamed\r\n" : "mv: failed\r\n");
+}
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
@@ -688,6 +706,8 @@ void _start(long argc, char **argv)
         if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
         if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
         if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
+        if (streq(cmd, "rm")) { cmd_rm(arg); puts_u("> "); continue; }
+        if (streq(cmd, "mv")) { cmd_mv(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -767,7 +787,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, rm, mv, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

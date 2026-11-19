@@ -664,6 +664,20 @@ static int64_t sys_pfweights(uint64_t mode, uint64_t out_va)
     return -1;
 }
 
+/* SYS_FUNLINK / SYS_FRENAME (Phase 11): delete and rename
+ * disk files via the VFS. */
+static int64_t sys_funlink(uint64_t path_va)
+{
+    if (!path_va) return -1;
+    return vfs_unlink((const char *)path_va);
+}
+
+static int64_t sys_frename(uint64_t old_va, uint64_t new_va)
+{
+    if (!old_va || !new_va) return -1;
+    return vfs_rename((const char *)old_va, (const char *)new_va);
+}
+
 /* SYS_ACCESS_DRAIN: access_drain(buf_va, max_records)
  * Copies up to max_records demand-access records (oldest first) into
  * the caller's buffer. Returns the number of records written, or -1. */
@@ -721,6 +735,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_RAW_SECTOR: return sys_raw_sector(arg1, arg2, arg3);
     case SYS_PREFETCH_POLICY: return sys_prefetch_policy(arg1);
     case SYS_PFWEIGHTS: return sys_pfweights(arg1, arg2);
+    case SYS_FUNLINK: return sys_funlink(arg1);
+    case SYS_FRENAME: return sys_frename(arg1, arg2);
     case SYS_ACCESS_DRAIN: return sys_access_drain(arg1, arg2);
 default:          return -1;  /* ENOSYS */
     }

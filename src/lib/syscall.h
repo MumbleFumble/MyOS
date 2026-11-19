@@ -166,6 +166,8 @@ struct pfweights_out {
     unsigned int neg;
 };
 long sys_pfweights(unsigned int mode, struct pfweights_out *out);
+long sys_funlink(const char *path);
+long sys_frename(const char *old_path, const char *new_path);
 long sys_tcpecho(const unsigned char *ip, unsigned short port,
                  struct tcpecho_args *args);
 long sys_nslookup(const char *name, const unsigned char *server,

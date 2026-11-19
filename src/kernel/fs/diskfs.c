@@ -111,11 +111,19 @@ static int diskfs_readdir_op(vfs_node_t *dir, uint32_t index,
                               char name_out[VFS_NAME_MAX])
 {
     (void)dir;
-    if ((int)index >= disk_count) return -1;
-    int len = 0;
-    while (disk_table[index].name[len]) len++;
-    for (int i = 0; i <= len; i++) name_out[i] = disk_table[index].name[i];
-    return 0;
+    /* Enumerate live entries only (Phase 11: deleted names vanish). */
+    uint32_t seen = 0;
+    for (int i = 0; i < disk_count; i++) {
+        if (disk_table[i].deleted) continue;
+        if (seen == index) {
+            int len = 0;
+            while (disk_table[i].name[len]) len++;
+            for (int j = 0; j <= len; j++) name_out[j] = disk_table[i].name[j];
+            return 0;
+        }
+        seen++;
+    }
+    return -1;
 }
 
 /* -----------------------------------------------------------------------
@@ -374,13 +382,77 @@ vfs_node_t *diskfs_create(const char *name)
     return diskfs_make_node(idx);
 }
 
+/* Delete a file (Phase 11 inc.2): tombstone its live record in
+ * place and mark the entry deleted. The name can be reused by a
+ * later create. Returns 0 or -1. */
+int diskfs_delete(const char *name)
+{
+    if (!disk_mounted) return -1;
+    int idx = diskfs_find(name);
+    if (idx < 0 || disk_table[idx].deleted) return -1;
+    if (diskfs_tombstone(disk_table[idx].data_lba) != 0) return -1;
+    disk_table[idx].deleted = 1;
+    if (bcache_sync() != 0) return -1;
+    return 0;
+}
+
+/* Rename a file (Phase 11 inc.2): append the full content under the
+ * new name, then tombstone the old record (same order as a rewrite,
+ * so a crash mid-rename leaves both copies, never none). Fails if
+ * the source is missing/deleted or the target name is live. */
+int diskfs_rename(const char *old_name, const char *new_name)
+{
+    if (!disk_mounted) return -1;
+    int nlen = 0;
+    while (new_name[nlen]) nlen++;
+    if (nlen == 0 || nlen >= MYFS_NAME_MAX) return -1;
+    int oi = diskfs_find(old_name);
+    if (oi < 0 || disk_table[oi].deleted) return -1;
+    int ni = diskfs_find(new_name);
+    if (ni >= 0 && !disk_table[ni].deleted) return -1;
+    if (ni < 0 && disk_count >= DISKFS_MAX_FILES) return -1;
+
+    uint64_t size = disk_table[oi].size;
+    uint8_t *content = (uint8_t *)kmalloc(size ? size : 1);
+    if (!content) return -1;
+    if (size) {
+        vfs_node_t *n = diskfs_make_node(oi);
+        if (!n) return -1;
+        int64_t got = diskfs_read_op(n, 0, size, content);
+        kfree(n->priv);
+        kfree(n);
+        if (got < 0) return -1;
+    }
+    int64_t nl = diskfs_append_record(new_name, content, size);
+    if (nl < 0) return -1;
+    if (diskfs_tombstone(disk_table[oi].data_lba) != 0) return -1;
+    if (ni < 0) {
+        ni = disk_count++;
+        for (int j = 0; j <= nlen; j++) disk_table[ni].name[j] = new_name[j];
+    }
+    disk_table[ni].size     = size;
+    disk_table[ni].data_lba = (uint32_t)nl;
+    disk_table[ni].deleted  = 0;
+    disk_table[oi].deleted  = 1;
+    if (bcache_sync() != 0) return -1;
+    return 0;
+}
+
 int diskfs_readdir(uint32_t index, char name_out[VFS_NAME_MAX])
 {
-    if (!disk_mounted || (int)index >= disk_count) return -1;
-    int len = 0;
-    while (disk_table[index].name[len]) len++;
-    for (int i = 0; i <= len; i++) name_out[i] = disk_table[index].name[i];
-    return 0;
+    if (!disk_mounted) return -1;
+    uint32_t seen = 0;
+    for (int i = 0; i < disk_count; i++) {
+        if (disk_table[i].deleted) continue;
+        if (seen == index) {
+            int len = 0;
+            while (disk_table[i].name[len]) len++;
+            for (int j = 0; j <= len; j++) name_out[j] = disk_table[i].name[j];
+            return 0;
+        }
+        seen++;
+    }
+    return -1;
 }
 
 int diskfs_is_mounted(void) { return disk_mounted; }
