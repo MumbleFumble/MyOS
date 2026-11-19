@@ -499,6 +499,24 @@ static void cmd_trace_full(void)
     puts_u("drained "); puts_u(itoa(total, buf)); puts_u(" switch records\r\n");
 }
 
+/* nslookup <name> [server]: resolve a DNS A record (Phase 9). */
+static void cmd_nslookup(const char *arg)
+{
+    char name[128];
+    int i = 0;
+    while (arg[i] && arg[i] != ' ' && i < 127) { name[i] = arg[i]; i++; }
+    name[i] = 0;
+    unsigned char server[4];
+    const unsigned char *sv = 0;
+    if (arg[i] == ' ' && parse_ip(arg + i + 1, server))
+        sv = server;
+    unsigned char out[4];
+    if (sys_nslookup(name, sv, out) != 0) {
+        puts_u("nslookup: failed\r\n");
+        return;
+    }
+    puts_u(name); puts_u(" = "); print_ip(out); puts_u("\r\n");
+}
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
@@ -543,6 +561,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "netsend")) { cmd_netsend(); puts_u("> "); continue; }
         if (streq(cmd, "ping")) { cmd_ping(arg); puts_u("> "); continue; }
         if (streq(cmd, "dhcp")) { cmd_dhcp(); puts_u("> "); continue; }
+        if (streq(cmd, "nslookup")) { cmd_nslookup(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -622,7 +641,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

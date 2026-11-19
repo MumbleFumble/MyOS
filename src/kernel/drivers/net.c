@@ -477,6 +477,115 @@ void net_route_ip(const uint8_t ip[4], uint8_t next_hop[4])
         ip_copy(next_hop, ip);
 }
 
+
+/* ---- DNS resolver (Phase 9 inc.1) ----
+ * One outstanding A query. net_dns_query() sends it (the caller in
+ * syscall.c resolves ARP first); the RX task's dns_input() matches
+ * the response by id and walks the answers (names may be compressed)
+ * to the first A record. */
+#define DNS_CLIENT_PORT 53317
+static volatile int dns_state = 0;   /* 0 idle, 1 waiting, 2 done, -1 error */
+static uint16_t dns_id = 0;
+static uint8_t dns_result_ip[4];
+
+int net_dns_begin(const char *name, const uint8_t server_ip[4],
+                  const uint8_t server_mac[6])
+{
+    static uint8_t q[320];
+    uint16_t id = (uint16_t)(timer_ticks() ^ 0xD355u);
+    q[0] = (uint8_t)(id >> 8); q[1] = (uint8_t)id;
+    q[2] = 0x01; q[3] = 0x00;              /* RD set */
+    q[4] = 0; q[5] = 1;                    /* QDCOUNT = 1 */
+    q[6] = 0; q[7] = 0; q[8] = 0; q[9] = 0; q[10] = 0; q[11] = 0;
+    uint32_t o = 12;
+    const char *c = name;
+    while (*c) {
+        const char *dot = c;
+        while (*dot && *dot != '.') dot++;
+        uint32_t ln = (uint32_t)(dot - c);
+        if (ln == 0 || ln > 63 || o + ln + 6 > sizeof(q))
+            return -1;
+        q[o++] = (uint8_t)ln;
+        for (uint32_t i = 0; i < ln; i++) q[o++] = (uint8_t)c[i];
+        c = (*dot == '.') ? dot + 1 : dot;
+    }
+    q[o++] = 0;
+    q[o++] = 0; q[o++] = 1;                /* QTYPE A */
+    q[o++] = 0; q[o++] = 1;                /* QCLASS IN */
+    uint16_t qlen = (uint16_t)o;
+    static uint8_t udp[8 + 320];
+    put_be16(udp + 0, DNS_CLIENT_PORT);
+    put_be16(udp + 2, 53);
+    put_be16(udp + 4, (uint16_t)(8 + qlen));
+    udp[6] = 0; udp[7] = 0;
+    for (uint16_t i = 0; i < qlen; i++) udp[8 + i] = q[i];
+    dns_id = id;
+    dns_state = 1;
+    return send_ipv4(server_mac, server_ip, 17, udp, (uint16_t)(8 + qlen));
+}
+
+int net_dns_poll(uint8_t out_ip[4])
+{
+    if (dns_state == 2) {
+        ip_copy(out_ip, dns_result_ip);
+        return 1;
+    }
+    return dns_state < 0 ? -1 : 0;
+}
+
+static int dns_skip_name(const uint8_t *p, uint32_t len, uint32_t off,
+                         uint32_t *next)
+{
+    uint32_t i = off;
+    for (;;) {
+        if (i >= len) return -1;
+        uint8_t c = p[i];
+        if (c == 0) { *next = i + 1; return 0; }
+        if ((c & 0xC0) == 0xC0) { *next = i + 2; return 0; }
+        if (c & 0xC0) return -1;
+        i += 1 + c;
+    }
+}
+
+static void dns_input(const uint8_t *udp, uint32_t ulen)
+{
+    if (dns_state != 1 || ulen < 8 + 12)
+        return;
+    const uint8_t *p = udp + 8;
+    uint32_t len = ulen - 8;
+    if (be16(p) != dns_id)
+        return;
+    if ((p[3] & 0x0F) != 0) { dns_state = -1; return; }   /* rcode */
+    uint16_t qd = be16(p + 4), an = be16(p + 6);
+    uint32_t o = 12;
+    for (uint16_t i = 0; i < qd; i++) {
+        if (dns_skip_name(p, len, o, &o) < 0 || o + 4 > len) {
+            dns_state = -1;
+            return;
+        }
+        o += 4;
+    }
+    for (uint16_t i = 0; i < an; i++) {
+        if (dns_skip_name(p, len, o, &o) < 0 || o + 10 > len) {
+            dns_state = -1;
+            return;
+        }
+        uint16_t type = be16(p + o);
+        uint16_t rdlen = be16(p + o + 8);
+        o += 10;
+        if (o + rdlen > len) { dns_state = -1; return; }
+        if (type == 1 && rdlen == 4) {
+            ip_copy(dns_result_ip, p + o);
+            dns_state = 2;
+            return;
+        }
+        o += rdlen;
+    }
+    dns_state = -1;   /* no A record in the answers */
+}
+
+void net_dns_server(uint8_t out[4]) { ip_copy(out, our_dns); }
+
 /* ---- UDP: echo server on port 7 ---- */
 static void udp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
 {
@@ -491,6 +600,10 @@ static void udp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         return;
     if (be16(udp + 2) == 68) {   /* DHCP client port */
         dhcp_input(udp, ulen);
+        return;
+    }
+    if (be16(udp + 2) == DNS_CLIENT_PORT) {
+        dns_input(udp, ulen);
         return;
     }
     if (be16(udp + 2) != 7)      /* echo port only */

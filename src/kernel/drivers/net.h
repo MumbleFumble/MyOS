@@ -36,6 +36,12 @@ void net_gateway(uint8_t out[4]);
 /* Next hop for dst: gateway when off-link, else dst itself. */
 void net_route_ip(const uint8_t ip[4], uint8_t next_hop[4]);
 
+/* DNS resolver (Phase 9 inc.1), driven by SYS_NSLOOKUP. */
+int  net_dns_begin(const char *name, const uint8_t server_ip[4],
+                   const uint8_t server_mac[6]);
+int  net_dns_poll(uint8_t out_ip[4]);   /* 1 done, 0 waiting, -1 error */
+void net_dns_server(uint8_t out[4]);    /* from DHCP, else 0.0.0.0 */
+
 void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
                      uint32_t *icmp_rx, uint32_t *icmp_tx,
                      uint32_t *udp_rx, uint32_t *udp_tx);

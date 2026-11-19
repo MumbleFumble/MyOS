@@ -153,6 +153,8 @@ struct dhcp_out {
     unsigned char dns[4];
 };
 long sys_dhcp(struct dhcp_out *out);
+long sys_nslookup(const char *name, const unsigned char *server,
+                  unsigned char out[4]);
 long sys_dma_stat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_wstat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_raw_sector(unsigned long idx, void *buf, long is_write);

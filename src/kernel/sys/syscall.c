@@ -391,6 +391,21 @@ static int64_t sys_netsend(void)
     return e1000_send_hello();
 }
 
+/* Resolve an on-link (or gateway) IP to a MAC via ARP, blocking
+ * in 100 ms slices for up to ~3 s. 1 on success. */
+static int resolve_mac(const uint8_t *ip, uint8_t mac[6])
+{
+    if (net_arp_lookup(ip, mac))
+        return 1;
+    net_arp_request(ip);
+    for (int i = 0; i < 30; i++) {
+        sched_block_current((uint64_t)timer_ticks() + 10);
+        if (net_arp_lookup(ip, mac))
+            return 1;
+    }
+    return 0;
+}
+
 /* SYS_PING (Phase 7): resolve ARP if needed, send an ICMP echo
  * request and block (in 100 ms slices) for the reply. Returns
  * the round-trip time in timer ticks (10 ms each) or -1. */
@@ -401,15 +416,8 @@ static int64_t sys_ping(uint64_t ip_va, uint64_t seq)
     uint8_t hop[4];
     net_route_ip(ip, hop);
     uint8_t mac[6];
-    if (!net_arp_lookup(hop, mac)) {
-        net_arp_request(hop);
-        int found = 0;
-        for (int i = 0; i < 30 && !found; i++) {
-            sched_block_current((uint64_t)timer_ticks() + 10);
-            found = net_arp_lookup(hop, mac);
-        }
-        if (!found) return -1;
-    }
+    if (!resolve_mac(hop, mac))
+        return -1;
     if (net_ping_send(ip, mac, (uint16_t)seq) != 0) return -1;
     for (int i = 0; i < 30; i++) {
         uint32_t rtt = 0;
@@ -448,6 +456,44 @@ static int64_t sys_dhcp(uint64_t out_va)
             return 0;
         }
         if (st < 0) return -1;
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return -1;
+}
+
+/* SYS_NSLOOKUP (Phase 9): resolve a DNS name to an IPv4 address.
+ * Server: arg2 pointer to 4 bytes, or 0 for the DHCP-learned
+ * server. Blocks in 100 ms slices for up to ~4 s. */
+static int64_t sys_nslookup(uint64_t name_va, uint64_t server_va,
+                            uint64_t out_va)
+{
+    if (!name_va || !out_va) return -1;
+    char name[128];
+    const char *src = (const char *)name_va;
+    int i = 0;
+    while (i < 127 && src[i]) { name[i] = src[i]; i++; }
+    name[i] = 0;
+    if (i == 0) return -1;
+    uint8_t server[4];
+    if (server_va) {
+        const uint8_t *sv = (const uint8_t *)server_va;
+        for (int k = 0; k < 4; k++) server[k] = sv[k];
+    } else {
+        net_dns_server(server);
+    }
+    int zero = 1;
+    for (int k = 0; k < 4; k++) if (server[k]) zero = 0;
+    if (zero) return -1;
+    uint8_t hop[4];
+    net_route_ip(server, hop);
+    uint8_t mac[6];
+    if (!resolve_mac(hop, mac)) return -1;
+    if (net_dns_begin(name, server, mac) != 0) return -1;
+    uint8_t *out = (uint8_t *)out_va;
+    for (int j = 0; j < 40; j++) {
+        int r = net_dns_poll(out);
+        if (r == 1) return 0;
+        if (r < 0) return -1;
         sched_block_current((uint64_t)timer_ticks() + 10);
     }
     return -1;
@@ -556,6 +602,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_NETSEND: return sys_netsend();
     case SYS_PING: return sys_ping(arg1, arg2);
     case SYS_DHCP: return sys_dhcp(arg1);
+    case SYS_NSLOOKUP: return sys_nslookup(arg1, arg2, arg3);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

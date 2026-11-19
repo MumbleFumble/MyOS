@@ -185,6 +185,13 @@ sys_dhcp:
     mov  rax, 30        /* SYS_DHCP */
     int  0x80
     ret
+/* long sys_nslookup(const char *name, const unsigned char *server,
+ *                   unsigned char out[4]) */
+.global sys_nslookup
+sys_nslookup:
+    mov  rax, 31        /* SYS_NSLOOKUP */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
