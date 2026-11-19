@@ -69,6 +69,6 @@ done
 for i in $(seq 1 30); do [ -f "$RESULT" ] && break; sleep 1; done
 grep -q "PEER OK" "$RESULT" 2>/dev/null || fail "peer verdict: $(cat "$RESULT" 2>/dev/null || echo none)"
 
-echo "[test] PASS: shell ping got 4 replies (ARP + ICMP via guest stack)"
+echo "[test] PASS: shell ping got 4 replies under cross-traffic (TX mutex contention)"
 kill -9 "$QPID" "$PEERPID" 2>/dev/null
 exit 0

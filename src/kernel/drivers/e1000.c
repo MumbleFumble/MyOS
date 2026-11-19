@@ -293,10 +293,86 @@ int e1000_link_up(void)
     return net_present && (reg_read(REG_STATUS) & STATUS_LU);
 }
 
+/* -----------------------------------------------------------------------
+ * TX mutex (Phase 8 inc.2): one shared tx_buf and one synchronous
+ * send path serve every task (the net task's replies, the shell's
+ * ping). Mirrors the ATA sleep mutex in ata.c: owner + waiter list
+ * under cli, ownership handoff on unlock, deadline backstop against
+ * a lost wake. Sends only ever happen from task context (never IRQ),
+ * so the idle task never waits on this lock.
+ * ----------------------------------------------------------------------- */
+#define TX_LOCK_MAX_WAITERS 4
+static struct task *tx_lock_owner = 0;
+static struct task *tx_lock_waiters[TX_LOCK_MAX_WAITERS];
+static int tx_lock_nwait = 0;
+
+static void tx_lock(void)
+{
+    struct task *self = sched_current_task();
+    for (;;) {
+        uint64_t rflags;
+        __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+        __asm__ volatile("cli");
+        for (int i = 0; i < tx_lock_nwait; i++) {
+            if (tx_lock_waiters[i] == self) {
+                for (int j = i + 1; j < tx_lock_nwait; j++)
+                    tx_lock_waiters[j - 1] = tx_lock_waiters[j];
+                tx_lock_nwait--;
+                break;
+            }
+        }
+        if (!tx_lock_owner) {
+            tx_lock_owner = self;
+            if (rflags & 0x200) __asm__ volatile("sti");
+            return;
+        }
+        if (tx_lock_owner == self) {   /* re-entrant: should not happen */
+            if (rflags & 0x200) __asm__ volatile("sti");
+            return;
+        }
+        if (tx_lock_nwait < TX_LOCK_MAX_WAITERS)
+            tx_lock_waiters[tx_lock_nwait++] = self;
+        if (rflags & 0x200) __asm__ volatile("sti");
+        if (!sched_block_current((uint64_t)timer_ticks() + 200))
+            continue;   /* idle task cannot block: spin (unreachable) */
+        if (tx_lock_owner == self)
+            return;
+    }
+}
+
+static void tx_unlock(void)
+{
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("cli");
+    if (tx_lock_nwait > 0) {
+        struct task *next = tx_lock_waiters[0];
+        for (int i = 1; i < tx_lock_nwait; i++)
+            tx_lock_waiters[i - 1] = tx_lock_waiters[i];
+        tx_lock_nwait--;
+        tx_lock_owner = next;
+        sched_wake_io(next);
+        sched_request_resched();
+    } else {
+        tx_lock_owner = 0;
+    }
+    if (rflags & 0x200) __asm__ volatile("sti");
+}
+
+static int e1000_send_locked(const uint8_t *frame, uint16_t len);
+
 int e1000_send(const uint8_t *frame, uint16_t len)
 {
     if (!net_present || len > RX_BUF_SIZE)
         return -1;
+    tx_lock();
+    int rc = e1000_send_locked(frame, len);
+    tx_unlock();
+    return rc;
+}
+
+static int e1000_send_locked(const uint8_t *frame, uint16_t len)
+{
     for (uint16_t i = 0; i < len; i++)
         tx_buf[i] = frame[i];
     struct e1000_tx_desc *d = &tx_ring[tx_next];
