@@ -626,13 +626,38 @@ static int64_t sys_raw_sector(uint64_t idx, uint64_t buf_va, uint64_t is_write)
 }
 
 /* SYS_PREFETCH_POLICY: prefetch_policy(index) -> 0 or -1.
- * Index 0 = none, 1 = sequential, 2 = stride, 3 = learned. */
+ * Index 0 = none, 1 = sequential, 2 = stride, 3 = learned,
+ * 4 = learned-online (Phase 10: weights update at runtime). */
 static int64_t sys_prefetch_policy(uint64_t index)
 {
     if (index == 0) { prefetch_set_policy(&prefetch_none); return 0; }
     if (index == 1) { prefetch_set_policy(&prefetch_sequential); return 0; }
     if (index == 2) { prefetch_set_policy(&prefetch_stride); return 0; }
     if (index == 3) { prefetch_set_policy(&prefetch_learned); return 0; }
+    if (index == 4) { prefetch_set_policy(&prefetch_learned_online); return 0; }
+    return -1;
+}
+
+/* SYS_PFWEIGHTS (Phase 10): inspect or reset the learned
+ * prefetch weights. mode 0 copies {int32 w[13]; uint32 pos, neg}
+ * to the caller; mode 1 zeroes the weights; mode 2 reseeds them
+ * from the trained values. */
+struct pfweights_out {
+    int32_t w[13];
+    uint32_t pos;
+    uint32_t neg;
+};
+
+static int64_t sys_pfweights(uint64_t mode, uint64_t out_va)
+{
+    if (mode == 0) {
+        if (!out_va) return -1;
+        struct pfweights_out *o = (struct pfweights_out *)out_va;
+        prefetch_weights_read(o->w, &o->pos, &o->neg);
+        return 0;
+    }
+    if (mode == 1) { prefetch_weights_zero(); return 0; }
+    if (mode == 2) { prefetch_weights_seed(); return 0; }
     return -1;
 }
 
@@ -692,6 +717,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_WSTAT: return sys_wstat(arg1, arg2, arg3);
     case SYS_RAW_SECTOR: return sys_raw_sector(arg1, arg2, arg3);
     case SYS_PREFETCH_POLICY: return sys_prefetch_policy(arg1);
+    case SYS_PFWEIGHTS: return sys_pfweights(arg1, arg2);
     case SYS_ACCESS_DRAIN: return sys_access_drain(arg1, arg2);
 default:          return -1;  /* ENOSYS */
     }

@@ -33,10 +33,10 @@ void prefetch_on_access(uint32_t lba, int hit, uint32_t file_id,
         active_policy->on_access(lba, hit, file_id, file_off);
 }
 
-void prefetch_note_outcome(int useful)
+void prefetch_note_outcome(uint32_t lba, int useful)
 {
     if (active_policy && active_policy->note_outcome)
-        active_policy->note_outcome(useful);
+        active_policy->note_outcome(lba, useful);
 }
 
 /* --- none: no prefetching --- */
@@ -115,7 +115,7 @@ struct prefetch_policy prefetch_stride = {
 };
 
 /* --- learned: candidate generation + linear scoring (inc.7, file
- * features inc.10) ---
+ * features inc.10; online updates Phase 10) ---
  *
  * Kernel port of scripts/sim_prefetch.py's LearnedPolicy, with weights
  * trained offline by scripts/train_prefetch.py (prefetch_weights.h,
@@ -133,12 +133,57 @@ struct prefetch_policy prefetch_stride = {
  * policy can see each file's own stream (file_seq, file_stride) and
  * prefetch another file's continuation before the reader switches back
  * to it (file_seq_other, the single largest trained weight).
+ *
+ * Phase 10 (online learning): the weights live in a mutable array
+ * lw[], seeded from the trained values. Scoring is vectorized
+ * (score = sum(lw[i] * x[i]) / 1024), which is bit-identical to the
+ * original per-term arithmetic for the frozen policy. The
+ * learned-online policy (index 4) additionally updates lw[] at
+ * runtime with a margin perceptron:
+ *   - an issued prefetch's feature vector is remembered by LBA; when
+ *     bcache reports its outcome, useful reinforces (if the score was
+ *     not already confident) and wasted penalizes;
+ *   - a rejected candidate's vector is also remembered; if the block
+ *     is demanded within 1024 accesses (a false negative), its
+ *     weights are reinforced.
+ * Updates move each weight by x[i]/16, clamped to +-8192. Switching
+ * policies reseeds lw[] from the trained weights.
  */
 #include "prefetch_weights.h"
 
 #define L_HIST 8
 #define L_SEEN_SIZE 1024
 #define L_FILES 16
+#define L_NW 13
+#define L_TAB 64
+
+/* Weight indices. */
+#define LW_BIAS          0
+#define LW_IS_NEXT       1
+#define LW_STRIDE_CONF   2
+#define LW_STRIDE_UNCONF 3
+#define LW_SEQ_RUN       4
+#define LW_DIST          5
+#define LW_RECENT_ACC    6
+#define LW_REUSE         7
+#define LW_JUMP          8
+#define LW_STREAM_CONT   9
+#define LW_FILE_SEQ      10
+#define LW_FILE_SEQ_OTHER 11
+#define LW_FILE_STRIDE   12
+
+static const int32_t lw_seed[L_NW] = {
+    PW_BIAS, PW_IS_NEXT, PW_STRIDE_CONFIRMED, PW_STRIDE_UNCONF,
+    PW_SEQ_RUN, PW_DIST, PW_RECENT_ACC, PW_REUSE, PW_JUMP,
+    PW_STREAM_CONT, PW_FILE_SEQ, PW_FILE_SEQ_OTHER, PW_FILE_STRIDE
+};
+static int32_t lw[L_NW] = {
+    PW_BIAS, PW_IS_NEXT, PW_STRIDE_CONFIRMED, PW_STRIDE_UNCONF,
+    PW_SEQ_RUN, PW_DIST, PW_RECENT_ACC, PW_REUSE, PW_JUMP,
+    PW_STREAM_CONT, PW_FILE_SEQ, PW_FILE_SEQ_OTHER, PW_FILE_STRIDE
+};
+static int l_online = 0;
+static uint32_t l_upd_pos = 0, l_upd_neg = 0;
 
 static uint32_t l_prev1, l_prev2;
 static int l_has1, l_has2;
@@ -160,6 +205,31 @@ static int lf_has_prev[L_FILES];
 static uint32_t lf_order[L_FILES];  /* file_ids, most recent last */
 static int lf_order_n;
 
+/* Online credit assignment: feature vectors of issued prefetches
+ * (joined by LBA when the outcome arrives) and of rejected
+ * candidates (joined if the block is demanded soon after). */
+struct l_rec {
+    uint32_t lba;
+    int32_t score;
+    int32_t x[L_NW];
+};
+static struct l_rec l_issued[L_TAB];
+static struct l_rec l_rej[L_TAB];
+static uint64_t l_rej_idx[L_TAB];
+static int l_issued_pos, l_rej_pos;
+static int l_tab_ready = 0;
+
+static void l_tab_init(void)
+{
+    for (int i = 0; i < L_TAB; i++) {
+        l_issued[i].lba = 0xFFFFFFFFu;
+        l_rej[i].lba = 0xFFFFFFFFu;
+    }
+    l_issued_pos = 0;
+    l_rej_pos = 0;
+    l_tab_ready = 1;
+}
+
 static int lf_find(uint32_t file_id)
 {
     for (int i = 0; i < L_FILES; i++)
@@ -168,7 +238,56 @@ static int lf_find(uint32_t file_id)
     return -1;
 }
 
-static void learned_note_outcome(int useful)
+static int32_t l_score(const int32_t *x)
+{
+    int32_t s = 0;
+    for (int i = 0; i < L_NW; i++)
+        s += (lw[i] * x[i]) / 1024;
+    return s;
+}
+
+static void l_apply_update(const int32_t *x, int32_t score, int positive)
+{
+    if (positive && score >= 1024)
+        return;   /* already confident and right */
+    if (!positive && score <= -1024)
+        return;   /* already confident and wrong (cannot happen for issued) */
+    for (int i = 0; i < L_NW; i++) {
+        int32_t d = x[i] >> 4;   /* learning rate: 1/16 of the feature */
+        lw[i] = positive ? lw[i] + d : lw[i] - d;
+        if (lw[i] > 8192) lw[i] = 8192;
+        if (lw[i] < -8192) lw[i] = -8192;
+    }
+    if (positive)
+        l_upd_pos++;
+    else
+        l_upd_neg++;
+}
+
+static void l_record(struct l_rec *tab, int *pos, uint32_t lba,
+                     const int32_t *x, int32_t score)
+{
+    struct l_rec *r = &tab[*pos];
+    r->lba = lba;
+    r->score = score;
+    for (int i = 0; i < L_NW; i++)
+        r->x[i] = x[i];
+    *pos = (*pos + 1) % L_TAB;
+}
+
+static void l_check_false_negative(uint32_t lba)
+{
+    for (int i = 0; i < L_TAB; i++) {
+        if (l_rej[i].lba == lba
+            && l_index - l_rej_idx[i] <= 1024) {
+            l_apply_update(l_rej[i].x, l_rej[i].score, 1);
+            l_rej[i].lba = 0xFFFFFFFFu;
+            return;
+        }
+    }
+}
+
+static void learned_note_outcome(uint32_t lba, int useful)
 {
     if (l_out_n == 32 && (l_out_mask & 0x80000000u))
         l_out_useful--;
@@ -177,9 +296,20 @@ static void learned_note_outcome(int useful)
         l_out_useful++;
     if (l_out_n < 32)
         l_out_n++;
+    if (l_online) {
+        if (!l_tab_ready)
+            l_tab_init();
+        for (int i = 0; i < L_TAB; i++) {
+            if (l_issued[i].lba == lba) {
+                l_apply_update(l_issued[i].x, l_issued[i].score, useful);
+                l_issued[i].lba = 0xFFFFFFFFu;
+                break;
+            }
+        }
+    }
 }
 
-static void learned_reset(void)
+static void learned_reset_common(void)
 {
     l_has1 = 0;
     l_has2 = 0;
@@ -189,6 +319,8 @@ static void learned_reset(void)
     l_out_n = 0;
     l_out_useful = 0;
     l_index = 0;
+    l_upd_pos = 0;
+    l_upd_neg = 0;
     for (int i = 0; i < L_SEEN_SIZE; i++) {
         l_seen_lba[i] = 0xFFFFFFFFu;
         l_seen_idx[i] = 0;
@@ -198,6 +330,23 @@ static void learned_reset(void)
         lf_has_prev[i] = 0;
     }
     lf_order_n = 0;
+    l_tab_init();
+}
+
+static void learned_reset(void)
+{
+    learned_reset_common();
+    l_online = 0;
+    for (int i = 0; i < L_NW; i++)
+        lw[i] = lw_seed[i];
+}
+
+static void learned_online_reset(void)
+{
+    learned_reset_common();
+    l_online = 1;
+    for (int i = 0; i < L_NW; i++)
+        lw[i] = lw_seed[i];
 }
 
 /* Fixed-point feature value for distance: 1024 / (1 + floor(log2(a))). */
@@ -214,6 +363,11 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
 {
     (void)hit;
     l_index++;
+    if (l_online) {
+        if (!l_tab_ready)
+            l_tab_init();
+        l_check_false_negative(lba);
+    }
     uint32_t slot = lba % L_SEEN_SIZE;
     l_seen_lba[slot] = lba;
     l_seen_idx[slot] = (uint32_t)l_index;
@@ -258,39 +412,49 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
             continue;
 
         uint32_t target = lba + (uint32_t)off;
-        int32_t score = PW_BIAS;
+        int32_t x[L_NW];
+        for (int i = 0; i < L_NW; i++)
+            x[i] = 0;
+        x[LW_BIAS] = 1024;
         if (off == 1)
-            score += PW_IS_NEXT;
+            x[LW_IS_NEXT] = 1024;
         if (have_d1 && d1 != 0 && off == d1 && d1 == d2)
-            score += PW_STRIDE_CONFIRMED;
+            x[LW_STRIDE_CONF] = 1024;
         if (have_d1 && d1 != 0 && off == d1 && d1 != d2)
-            score += PW_STRIDE_UNCONF;
+            x[LW_STRIDE_UNCONF] = 1024;
         if (off >= 1 && off <= 4) {
             uint32_t run = l_seq_run < 4 ? l_seq_run : 4;
-            score += (PW_SEQ_RUN * (int32_t)run) / 4;
+            x[LW_SEQ_RUN] = (int32_t)run * 256;
         }
-        score += (PW_DIST * l_dist_fp((uint32_t)off)) / 1024;
-        score += (PW_RECENT_ACC * acc_fp) / 1024;
+        x[LW_DIST] = l_dist_fp((uint32_t)off);
+        x[LW_RECENT_ACC] = acc_fp;
         uint32_t ts = target % L_SEEN_SIZE;
         if (l_seen_lba[ts] == target && l_index - l_seen_idx[ts] <= 512)
-            score += PW_REUSE;
+            x[LW_REUSE] = 1024;
         if (have_d1 && (d1 > 4 || d1 < -4))
-            score += PW_JUMP;
+            x[LW_JUMP] = 1024;
         if (off == 1 && stream_cont)
-            score += PW_STREAM_CONT;
+            x[LW_STREAM_CONT] = 1024;
         if (cur >= 0) {
             if (file_off == lf_last_off[cur] + 1 && off == 1)
-                score += PW_FILE_SEQ;
+                x[LW_FILE_SEQ] = 1024;
             if (lf_has_prev[cur]) {
                 int32_t fd_now = (int32_t)(file_off - lf_last_off[cur]);
                 int32_t fd_prev = (int32_t)(lf_last_off[cur] - lf_prev_off[cur]);
                 if (fd_now != 0 && fd_now == fd_prev && off == fd_now)
-                    score += PW_FILE_STRIDE;
+                    x[LW_FILE_STRIDE] = 1024;
             }
         }
 
-        if (score > PW_THRESHOLD)
+        int32_t score = l_score(x);
+        if (score > PW_THRESHOLD) {
             bcache_prefetch_enqueue(target, 1);
+            if (l_online)
+                l_record(l_issued, &l_issued_pos, target, x, score);
+        } else if (l_online) {
+            l_record(l_rej, &l_rej_pos, target, x, score);
+            l_rej_idx[(l_rej_pos + L_TAB - 1) % L_TAB] = l_index;
+        }
     }
 
     /* Other files' continuations (file_seq_other). */
@@ -305,11 +469,22 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
                 continue;
             uint32_t target = lf_last_lba[fi] + 1;
             uint32_t gap = target > lba ? target - lba : lba - target;
-            int32_t score = PW_BIAS + PW_FILE_SEQ_OTHER;
-            score += (PW_DIST * l_dist_fp(gap)) / 1024;
-            score += (PW_RECENT_ACC * acc_fp) / 1024;
-            if (score > PW_THRESHOLD)
+            int32_t x[L_NW];
+            for (int i = 0; i < L_NW; i++)
+                x[i] = 0;
+            x[LW_BIAS] = 1024;
+            x[LW_DIST] = l_dist_fp(gap);
+            x[LW_RECENT_ACC] = acc_fp;
+            x[LW_FILE_SEQ_OTHER] = 1024;
+            int32_t score = l_score(x);
+            if (score > PW_THRESHOLD) {
                 bcache_prefetch_enqueue(target, 1);
+                if (l_online)
+                    l_record(l_issued, &l_issued_pos, target, x, score);
+            } else if (l_online) {
+                l_record(l_rej, &l_rej_pos, target, x, score);
+                l_rej_idx[(l_rej_pos + L_TAB - 1) % L_TAB] = l_index;
+            }
             others++;
         }
     }
@@ -380,3 +555,33 @@ struct prefetch_policy prefetch_learned = {
     .reset = learned_reset,
     .note_outcome = learned_note_outcome,
 };
+
+struct prefetch_policy prefetch_learned_online = {
+    .name = "learned-online",
+    .on_access = learned_on_access,
+    .reset = learned_online_reset,
+    .note_outcome = learned_note_outcome,
+};
+
+/* Runtime weight access for SYS_PFWEIGHTS (Phase 10). */
+void prefetch_weights_read(int32_t out[L_NW], uint32_t *pos, uint32_t *neg)
+{
+    for (int i = 0; i < L_NW; i++)
+        out[i] = lw[i];
+    *pos = l_upd_pos;
+    *neg = l_upd_neg;
+}
+
+void prefetch_weights_zero(void)
+{
+    for (int i = 0; i < L_NW; i++)
+        lw[i] = 0;
+    l_upd_pos = 0;
+    l_upd_neg = 0;
+}
+
+void prefetch_weights_seed(void)
+{
+    for (int i = 0; i < L_NW; i++)
+        lw[i] = lw_seed[i];
+}

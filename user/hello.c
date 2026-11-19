@@ -590,6 +590,50 @@ static void cmd_httpget(const char *arg)
     puts_u(out);
     puts_u("\r\n");
 }
+/* Print one fixed-point (x1024) weight as sNNN.NNN. */
+static void print_fp(int v)
+{
+    char buf[16];
+    if (v < 0) { puts_u("-"); v = -v; }
+    puts_u(itoa(v / 1024, buf));
+    puts_u(".");
+    int frac = (v % 1024) * 1000 / 1024;
+    if (frac < 100) puts_u("0");
+    if (frac < 10) puts_u("0");
+    puts_u(itoa(frac, buf));
+}
+
+/* pfweights [zero|seed]: inspect or reset the learned prefetch
+ * weights (Phase 10 online learning). */
+static const char *pfw_names[13] = {
+    "bias", "is_next", "stride_conf", "stride_unconf", "seq_run",
+    "dist", "recent_acc", "reuse", "jump", "stream_cont",
+    "file_seq", "file_seq_other", "file_stride"
+};
+
+static void cmd_pfweights(const char *arg)
+{
+    if (streq(arg, "zero")) {
+        sys_pfweights(1, 0);
+        puts_u("pfweights: zeroed\r\n");
+        return;
+    }
+    if (streq(arg, "seed")) {
+        sys_pfweights(2, 0);
+        puts_u("pfweights: reseeded\r\n");
+        return;
+    }
+    struct pfweights_out o;
+    if (sys_pfweights(0, &o) != 0) { puts_u("pfweights: failed\r\n"); return; }
+    for (int i = 0; i < 13; i++) {
+        puts_u(pfw_names[i]); puts_u("="); print_fp(o.w[i]);
+        puts_u(i % 3 == 2 || i == 12 ? "\r\n" : "  ");
+    }
+    char buf[16];
+    puts_u("updates: +"); puts_u(itoa((long)o.pos, buf));
+    puts_u(" -"); puts_u(itoa((long)o.neg, buf));
+    puts_u("\r\n");
+}
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
@@ -637,11 +681,12 @@ void _start(long argc, char **argv)
         if (streq(cmd, "nslookup")) { cmd_nslookup(arg); puts_u("> "); continue; }
         if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
         if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
+        if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
             if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
-            if (pi < 0 || pi > 3) { puts_u("usage: prefetch <0|1|2|3>  (0=none 1=seq 2=stride 3=learned)\r\n> "); continue; }
+            if (pi < 0 || pi > 4) { puts_u("usage: prefetch <0|1|2|3|4>  (0=none 1=seq 2=stride 3=learned 4=learned-online)\r\n> "); continue; }
             long r = sys_prefetch_policy(pi);
             puts_u(r == 0 ? "prefetch policy set\r\n> " : "prefetch: failed\r\n> ");
             continue;
@@ -716,7 +761,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

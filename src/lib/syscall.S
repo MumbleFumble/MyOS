@@ -199,6 +199,12 @@ sys_tcpecho:
     mov  rax, 32        /* SYS_TCPECHO */
     int  0x80
     ret
+/* long sys_pfweights(unsigned int mode, struct pfweights_out *out) */
+.global sys_pfweights
+sys_pfweights:
+    mov  rax, 33        /* SYS_PFWEIGHTS */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy

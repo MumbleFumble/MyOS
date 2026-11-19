@@ -159,6 +159,12 @@ struct tcpecho_args {
     unsigned int cap;
     char *out;
 };
+struct pfweights_out {
+    int w[13];
+    unsigned int pos;
+    unsigned int neg;
+};
+long sys_pfweights(unsigned int mode, struct pfweights_out *out);
 long sys_tcpecho(const unsigned char *ip, unsigned short port,
                  struct tcpecho_args *args);
 long sys_nslookup(const char *name, const unsigned char *server,

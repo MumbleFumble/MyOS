@@ -213,7 +213,7 @@ int bcache_write(uint32_t lba, const uint8_t *data)
     f = bcache_cli_save();
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
-        prefetch_note_outcome(0);  /* prefetch evicted unused */
+        prefetch_note_outcome(cache[v].lba, 0);  /* prefetch evicted unused */
     cache[v].lba = lba;
     for (int i = 0; i < 512; i++)
         cache[v].data[i] = data[i];
@@ -302,7 +302,7 @@ int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
         for (int i = 0; i < 512; i++)
             buf[i] = cache[idx].data[i];
         if (cache[idx].prefetched_unused)
-            prefetch_note_outcome(1);  /* consumed a prefetch */
+            prefetch_note_outcome(lba, 1);  /* consumed a prefetch */
         cache[idx].prefetched_unused = 0;
         bcache_touch(idx);
         stat_hits++;
@@ -337,7 +337,7 @@ int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
         for (int i = 0; i < 512; i++)
             buf[i] = cache[idx].data[i];
         if (cache[idx].prefetched_unused)
-            prefetch_note_outcome(1);  /* consumed a prefetch */
+            prefetch_note_outcome(lba, 1);  /* consumed a prefetch */
         cache[idx].prefetched_unused = 0;
         bcache_touch(idx);
         stat_hits++;
@@ -361,7 +361,7 @@ int bcache_read_ctx(uint32_t lba, uint8_t *buf, uint32_t file_id,
     f = bcache_cli_save();
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
-        prefetch_note_outcome(0);  /* prefetch evicted unused */
+        prefetch_note_outcome(cache[v].lba, 0);  /* prefetch evicted unused */
     cache[v].lba = lba;
     for (int i = 0; i < 512; i++) {
         cache[v].data[i] = tmp[i];
@@ -417,7 +417,7 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data)
     if (bcache_lookup(lba) >= 0) { bcache_restore(f); return; }
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
-        prefetch_note_outcome(0);  /* prefetch evicted unused */
+        prefetch_note_outcome(cache[v].lba, 0);  /* prefetch evicted unused */
     /* Prefetches go to the LRU end: use a sequence number older than any
      * real access so a bad prefetch doesn't evict useful data. */
     cache[v].lba = lba;
@@ -454,7 +454,7 @@ void bcache_prefetch_insert_mru(uint32_t lba, const uint8_t *data)
     if (bcache_lookup(lba) >= 0) { bcache_restore(f); return; }
     int v = bcache_victim();
     if (cache[v].valid && cache[v].prefetched_unused)
-        prefetch_note_outcome(0);  /* prefetch evicted unused */
+        prefetch_note_outcome(cache[v].lba, 0);  /* prefetch evicted unused */
     cache[v].lba = lba;
     for (int i = 0; i < 512; i++)
         cache[v].data[i] = data[i];
