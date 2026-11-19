@@ -192,6 +192,13 @@ sys_nslookup:
     mov  rax, 31        /* SYS_NSLOOKUP */
     int  0x80
     ret
+/* long sys_tcpecho(const unsigned char *ip, unsigned short port,
+ *                  struct tcpecho_args *args) */
+.global sys_tcpecho
+sys_tcpecho:
+    mov  rax, 32        /* SYS_TCPECHO */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy

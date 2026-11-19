@@ -153,6 +153,14 @@ struct dhcp_out {
     unsigned char dns[4];
 };
 long sys_dhcp(struct dhcp_out *out);
+struct tcpecho_args {
+    const char *data;
+    unsigned int len;
+    unsigned int cap;
+    char *out;
+};
+long sys_tcpecho(const unsigned char *ip, unsigned short port,
+                 struct tcpecho_args *args);
 long sys_nslookup(const char *name, const unsigned char *server,
                   unsigned char out[4]);
 long sys_dma_stat(unsigned long *dma, unsigned long *err, unsigned long *pio);

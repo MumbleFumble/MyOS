@@ -517,6 +517,37 @@ static void cmd_nslookup(const char *arg)
     }
     puts_u(name); puts_u(" = "); print_ip(out); puts_u("\r\n");
 }
+/* tcpecho <ip> <port> <text>: one TCP round trip (Phase 9). */
+static void cmd_tcpecho(const char *arg)
+{
+    char ipbuf[24];
+    int i = 0;
+    while (arg[i] && arg[i] != ' ' && i < 23) { ipbuf[i] = arg[i]; i++; }
+    ipbuf[i] = 0;
+    unsigned char ip[4];
+    if (!parse_ip(ipbuf, ip) || arg[i] != ' ') {
+        puts_u("usage: tcpecho <ip> <port> <text>\r\n");
+        return;
+    }
+    const char *p = arg + i + 1;
+    int port = 0;
+    while (*p >= '0' && *p <= '9') { port = port * 10 + (*p - '0'); p++; }
+    if (*p != ' ' || port == 0 || port > 65535) {
+        puts_u("usage: tcpecho <ip> <port> <text>\r\n");
+        return;
+    }
+    p++;
+    unsigned int tlen = 0;
+    while (p[tlen]) tlen++;
+    if (tlen == 0) { puts_u("usage: tcpecho <ip> <port> <text>\r\n"); return; }
+    static char out[2048];
+    struct tcpecho_args a;
+    a.data = p; a.len = tlen; a.cap = 2047; a.out = out;
+    long n = sys_tcpecho(ip, (unsigned short)port, &a);
+    if (n < 0) { puts_u("tcpecho: failed\r\n"); return; }
+    out[n] = 0;
+    puts_u(out); puts_u("\r\n");
+}
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
@@ -562,6 +593,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "ping")) { cmd_ping(arg); puts_u("> "); continue; }
         if (streq(cmd, "dhcp")) { cmd_dhcp(); puts_u("> "); continue; }
         if (streq(cmd, "nslookup")) { cmd_nslookup(arg); puts_u("> "); continue; }
+        if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -641,7 +673,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, tcpecho, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

@@ -42,6 +42,21 @@ int  net_dns_begin(const char *name, const uint8_t server_ip[4],
 int  net_dns_poll(uint8_t out_ip[4]);   /* 1 done, 0 waiting, -1 error */
 void net_dns_server(uint8_t out[4]);    /* from DHCP, else 0.0.0.0 */
 
+/* TCP client (Phase 9 inc.2), driven by SYS_TCPECHO. */
+enum { NET_TCP_CLOSED = 0, NET_TCP_SYN_SENT, NET_TCP_ESTABLISHED,
+       NET_TCP_FIN_WAIT, NET_TCP_CLOSE_WAIT, NET_TCP_LAST_ACK };
+void net_tcp_reset(void);
+int  net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6],
+                     uint16_t port);
+int  net_tcp_state(void);
+int  net_tcp_error(void);
+int  net_tcp_acked(void);
+int  net_tcp_eof(void);
+int  net_tcp_send(const uint8_t *data, uint32_t len);
+int  net_tcp_recv(uint8_t *out, uint32_t cap);
+void net_tcp_close(void);
+void net_tcp_retransmit(void);
+
 void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
                      uint32_t *icmp_rx, uint32_t *icmp_tx,
                      uint32_t *udp_rx, uint32_t *udp_tx);

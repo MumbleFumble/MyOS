@@ -499,6 +499,79 @@ static int64_t sys_nslookup(uint64_t name_va, uint64_t server_va,
     return -1;
 }
 
+/* SYS_TCPECHO (Phase 9): one TCP exchange. Connects to ip:port,
+ * sends args->data, collects the reply into args->out until the
+ * peer closes or the buffer fills, then closes. Returns the
+ * byte count or -1. All waits block in 100 ms slices and drive
+ * the TCP retransmit timer. */
+struct tcpecho_args {
+    const char *data;
+    unsigned int len;
+    unsigned int cap;
+    char *out;
+};
+
+static int64_t sys_tcpecho(uint64_t ip_va, uint64_t port,
+                           uint64_t args_va)
+{
+    if (!ip_va || !args_va) return -1;
+    const uint8_t *ip = (const uint8_t *)ip_va;
+    struct tcpecho_args *a = (struct tcpecho_args *)args_va;
+    if (!a->data || !a->out || a->len == 0 || a->len > 1024
+        || a->cap == 0)
+        return -1;
+    uint8_t hop[4];
+    net_route_ip(ip, hop);
+    uint8_t mac[6];
+    if (!resolve_mac(hop, mac)) return -1;
+    net_tcp_reset();
+    if (net_tcp_connect(ip, mac, (uint16_t)port) != 0) return -1;
+    int i;
+    for (i = 0; i < 50; i++) {
+        if (net_tcp_state() == NET_TCP_ESTABLISHED) break;
+        if (net_tcp_error()) { net_tcp_reset(); return -1; }
+        net_tcp_retransmit();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    if (net_tcp_state() != NET_TCP_ESTABLISHED) {
+        net_tcp_reset();
+        return -1;
+    }
+    static uint8_t kbuf[1024];
+    const char *d = a->data;
+    for (unsigned int k = 0; k < a->len; k++)
+        kbuf[k] = (uint8_t)d[k];
+    if (net_tcp_send(kbuf, a->len) != 0) {
+        net_tcp_reset();
+        return -1;
+    }
+    for (i = 0; i < 50; i++) {
+        if (net_tcp_acked()) break;
+        if (net_tcp_error()) break;
+        net_tcp_retransmit();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    unsigned int total = 0;
+    for (i = 0; i < 100 && total < a->cap; i++) {
+        int n = net_tcp_recv((uint8_t *)a->out + total,
+                             a->cap - total);
+        if (n > 0) total += (unsigned int)n;
+        if (net_tcp_eof()) break;
+        if (net_tcp_error()) break;
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    net_tcp_close();
+    for (i = 0; i < 20; i++) {
+        if (net_tcp_state() == NET_TCP_CLOSED) break;
+        net_tcp_retransmit();
+        sched_block_current((uint64_t)timer_ticks() + 5);
+    }
+    int err = net_tcp_error();
+    net_tcp_reset();
+    if (err && total == 0) return -1;
+    return (int64_t)total;
+}
+
 /* SYS_BCACHE_SYNC: flush all dirty cache entries to disk. */
 static int64_t sys_bcache_sync(void)
 {
@@ -603,6 +676,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_PING: return sys_ping(arg1, arg2);
     case SYS_DHCP: return sys_dhcp(arg1);
     case SYS_NSLOOKUP: return sys_nslookup(arg1, arg2, arg3);
+    case SYS_TCPECHO: return sys_tcpecho(arg1, arg2, arg3);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);
