@@ -548,6 +548,48 @@ static void cmd_tcpecho(const char *arg)
     out[n] = 0;
     puts_u(out); puts_u("\r\n");
 }
+/* httpget <host> <path>: HTTP/1.0 GET over TCP (Phase 9 inc.3).
+ * Resolves the host with DNS when it is not a dotted quad, then
+ * runs the whole exchange through SYS_TCPECHO. */
+static int sput(char *dst, int o, const char *s)
+{
+    while (*s) dst[o++] = *s++;
+    return o;
+}
+
+static void cmd_httpget(const char *arg)
+{
+    char host[128];
+    int i = 0;
+    while (arg[i] && arg[i] != ' ' && i < 127) { host[i] = arg[i]; i++; }
+    host[i] = 0;
+    if (arg[i] != ' ') { puts_u("usage: httpget <host> <path>\r\n"); return; }
+    const char *path = arg + i + 1;
+    if (!*path) { puts_u("usage: httpget <host> <path>\r\n"); return; }
+    unsigned char ip[4];
+    if (!parse_ip(host, ip)) {
+        if (sys_nslookup(host, 0, ip) != 0) {
+            puts_u("httpget: cannot resolve host\r\n");
+            return;
+        }
+    }
+    static char req[512];
+    int o = 0;
+    o = sput(req, o, "GET ");
+    o = sput(req, o, path);
+    o = sput(req, o, " HTTP/1.0\r\nHost: ");
+    o = sput(req, o, host);
+    o = sput(req, o, "\r\n\r\n");
+    req[o] = 0;
+    static char out[4096];
+    struct tcpecho_args a;
+    a.data = req; a.len = (unsigned int)o; a.cap = 4095; a.out = out;
+    long n = sys_tcpecho(ip, 80, &a);
+    if (n < 0) { puts_u("httpget: failed\r\n"); return; }
+    out[n] = 0;
+    puts_u(out);
+    puts_u("\r\n");
+}
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
@@ -594,6 +636,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "dhcp")) { cmd_dhcp(); puts_u("> "); continue; }
         if (streq(cmd, "nslookup")) { cmd_nslookup(arg); puts_u("> "); continue; }
         if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
+        if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -673,7 +716,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, tcpecho, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 
