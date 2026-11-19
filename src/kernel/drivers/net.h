@@ -24,6 +24,18 @@ void net_arp_request(const uint8_t ip[4]);
 int  net_ping_send(const uint8_t ip[4], const uint8_t mac[6], uint16_t seq);
 int  net_ping_result(uint32_t *rtt_ticks);
 
+/* DHCP client (Phase 8 inc.3), driven by SYS_DHCP. */
+void net_dhcp_start(void);
+void net_dhcp_request(void);
+int  net_dhcp_state(void);       /* 0 idle, 1 discover, 2 request, 3 bound, -1 nak */
+int  net_dhcp_have_offer(void);
+void net_dhcp_info(uint8_t ip[4], uint8_t gw[4], uint8_t mask[4],
+                   uint8_t dns[4]);
+void net_our_ip(uint8_t out[4]);
+void net_gateway(uint8_t out[4]);
+/* Next hop for dst: gateway when off-link, else dst itself. */
+void net_route_ip(const uint8_t ip[4], uint8_t next_hop[4]);
+
 void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
                      uint32_t *icmp_rx, uint32_t *icmp_tx,
                      uint32_t *udp_rx, uint32_t *udp_tx);

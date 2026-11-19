@@ -16,7 +16,10 @@
 #include "../arch/timer.h"
 #include "../proc/sched.h"
 
-static const uint8_t our_ip[4] = {192, 168, 77, 2};
+static uint8_t our_ip[4]   = {192, 168, 77, 2};   /* static default; DHCP can rebind */
+static uint8_t our_mask[4] = {255, 255, 255, 0};
+static uint8_t our_gw[4]   = {0, 0, 0, 0};
+static uint8_t our_dns[4]  = {0, 0, 0, 0};
 
 static uint32_t stat_arp_rx = 0, stat_arp_tx = 0;
 static uint32_t stat_icmp_rx = 0, stat_icmp_tx = 0;
@@ -41,6 +44,18 @@ static void put_be16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)(v >> 8);
     p[1] = (uint8_t)v;
+}
+static uint32_t be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8) | p[3];
+}
+static void put_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
 }
 static int ip_eq(const uint8_t *a, const uint8_t *b)
 {
@@ -200,8 +215,9 @@ static void arp_input(const uint8_t *f, uint16_t len)
 }
 
 /* ---- IPv4 send path (shared by ICMP + UDP) ---- */
-static int send_ipv4(const uint8_t *dst_mac, const uint8_t *dst_ip,
-                     uint8_t proto, const uint8_t *payload, uint16_t plen)
+static int send_ipv4_from(const uint8_t *src_ip, const uint8_t *dst_mac,
+                          const uint8_t *dst_ip, uint8_t proto,
+                          const uint8_t *payload, uint16_t plen)
 {
     static uint8_t f[2048];
     if (14 + 20 + plen > (int)sizeof(f))
@@ -220,7 +236,7 @@ static int send_ipv4(const uint8_t *dst_mac, const uint8_t *dst_ip,
     ip[8] = 64;
     ip[9] = proto;
     ip[10] = 0; ip[11] = 0;
-    ip_copy(ip + 12, our_ip);
+    ip_copy(ip + 12, src_ip);
     ip_copy(ip + 16, dst_ip);
     put_be16(ip + 10, cksum(ip, 20));
     for (uint16_t i = 0; i < plen; i++)
@@ -229,6 +245,12 @@ static int send_ipv4(const uint8_t *dst_mac, const uint8_t *dst_ip,
     if (frame_len < 60)
         frame_len = 60;
     return e1000_send(f, frame_len);
+}
+
+static int send_ipv4(const uint8_t *dst_mac, const uint8_t *dst_ip,
+                     uint8_t proto, const uint8_t *payload, uint16_t plen)
+{
+    return send_ipv4_from(our_ip, dst_mac, dst_ip, proto, payload, plen);
 }
 
 /* ---- ICMP ---- */
@@ -306,6 +328,155 @@ int net_ping_result(uint32_t *rtt_ticks)
     return -1;
 }
 
+
+/* ---- DHCP client (Phase 8 inc.3) ----
+ * Driven by SYS_DHCP: net_dhcp_start() broadcasts a DISCOVER (from
+ * 0.0.0.0, broadcast-reply flag set so answers come to the broadcast
+ * address our IPv4 input accepts before we have an address), the RX
+ * task's dhcp_input() records the OFFER, net_dhcp_request() asks for
+ * it, and the ACK commits our_ip/mask/gw/dns. */
+static volatile int dhcp_state = 0;   /* 0 idle, 1 discover, 2 request, 3 bound, -1 nak */
+static volatile int dhcp_have_offer = 0;
+static uint32_t dhcp_xid = 0;
+static uint8_t dhcp_offer_ip[4];
+static uint8_t dhcp_server_ip[4];
+static uint8_t dhcp_opt_mask[4];
+static uint8_t dhcp_opt_gw[4];
+static uint8_t dhcp_opt_dns[4];
+
+static void dhcp_send(uint8_t msg_type)
+{
+    static uint8_t bootp[300];
+    for (int i = 0; i < 300; i++) bootp[i] = 0;
+    bootp[0] = 1; bootp[1] = 1; bootp[2] = 6; bootp[3] = 0;
+    put_be32(bootp + 4, dhcp_xid);
+    put_be16(bootp + 10, 0x8000);          /* want broadcast replies */
+    uint8_t mac[6];
+    e1000_mac_addr(mac);
+    mac_copy(bootp + 28, mac);
+    bootp[236] = 0x63; bootp[237] = 0x82; bootp[238] = 0x53; bootp[239] = 0x63;
+    uint8_t *o = bootp + 240;
+    *o++ = 53; *o++ = 1; *o++ = msg_type;
+    if (msg_type == 3) {                   /* REQUEST: what we want */
+        *o++ = 50; *o++ = 4; ip_copy(o, dhcp_offer_ip); o += 4;
+        *o++ = 54; *o++ = 4; ip_copy(o, dhcp_server_ip); o += 4;
+    }
+    *o++ = 55; *o++ = 3; *o++ = 1; *o++ = 3; *o++ = 6;
+    *o++ = 255;
+    uint16_t blen = (uint16_t)(o - bootp);
+    static uint8_t udp[8 + 300];
+    put_be16(udp + 0, 68);
+    put_be16(udp + 2, 67);
+    put_be16(udp + 4, (uint16_t)(8 + blen));
+    udp[6] = 0; udp[7] = 0;
+    for (uint16_t i = 0; i < blen; i++) udp[8 + i] = bootp[i];
+    static const uint8_t zero_ip[4] = {0, 0, 0, 0};
+    static const uint8_t bip[4] = {255, 255, 255, 255};
+    static const uint8_t bmac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    send_ipv4_from(zero_ip, bmac, bip, 17, udp, (uint16_t)(8 + blen));
+}
+
+void net_dhcp_start(void)
+{
+    dhcp_xid = (uint32_t)timer_ticks() ^ 0x4D590000u;
+    dhcp_have_offer = 0;
+    dhcp_state = 1;
+    dhcp_send(1);                          /* DISCOVER */
+}
+
+void net_dhcp_request(void)
+{
+    dhcp_state = 2;
+    dhcp_send(3);                          /* REQUEST */
+}
+
+int net_dhcp_state(void) { return dhcp_state; }
+int net_dhcp_have_offer(void) { return dhcp_have_offer; }
+
+static void dhcp_input(const uint8_t *udp, uint32_t ulen)
+{
+    const uint8_t *p = udp + 8;
+    uint32_t plen = ulen - 8;
+    if (plen < 240 || p[0] != 2)
+        return;
+    if (be32(p + 4) != dhcp_xid)
+        return;
+    if (p[236] != 0x63 || p[237] != 0x82 || p[238] != 0x53 || p[239] != 0x63)
+        return;
+    uint8_t msg_type = 0;
+    uint8_t server[4] = {0, 0, 0, 0};
+    int have_server = 0;
+    uint32_t o = 240;
+    while (o + 1 < plen) {
+        uint8_t code = p[o];
+        if (code == 255)
+            break;
+        if (code == 0) { o++; continue; }
+        uint8_t ln = p[o + 1];
+        if (o + 2 + ln > plen)
+            break;
+        const uint8_t *v = p + o + 2;
+        if (code == 53 && ln >= 1)
+            msg_type = v[0];
+        else if (code == 54 && ln >= 4) { ip_copy(server, v); have_server = 1; }
+        else if (code == 1 && ln >= 4)
+            ip_copy(dhcp_opt_mask, v);
+        else if (code == 3 && ln >= 4)
+            ip_copy(dhcp_opt_gw, v);
+        else if (code == 6 && ln >= 4)
+            ip_copy(dhcp_opt_dns, v);
+        o += 2 + ln;
+    }
+    if (msg_type == 2 && dhcp_state == 1) {          /* OFFER */
+        ip_copy(dhcp_offer_ip, p + 16);
+        if (have_server)
+            ip_copy(dhcp_server_ip, server);
+        else
+            ip_copy(dhcp_server_ip, p + 20);         /* siaddr */
+        dhcp_have_offer = 1;
+    } else if (msg_type == 5 && dhcp_state == 2) {   /* ACK: commit */
+        ip_copy(our_ip, p + 16);
+        ip_copy(our_mask, dhcp_opt_mask);
+        ip_copy(our_gw, dhcp_opt_gw);
+        ip_copy(our_dns, dhcp_opt_dns);
+        dhcp_state = 3;
+        nputs("[net] dhcp bound ");
+        nputip(our_ip);
+        nputs(" gw ");
+        nputip(our_gw);
+        nputs("\r\n");
+    } else if (msg_type == 6) {                      /* NAK */
+        dhcp_state = -1;
+    }
+}
+
+void net_our_ip(uint8_t out[4]) { ip_copy(out, our_ip); }
+void net_gateway(uint8_t out[4]) { ip_copy(out, our_gw); }
+
+void net_dhcp_info(uint8_t ip[4], uint8_t gw[4], uint8_t mask[4],
+                   uint8_t dns[4])
+{
+    ip_copy(ip, our_ip);
+    ip_copy(gw, our_gw);
+    ip_copy(mask, our_mask);
+    ip_copy(dns, our_dns);
+}
+
+/* Next hop for a destination: the gateway when off-link and one is
+ * configured, else the destination itself. */
+void net_route_ip(const uint8_t ip[4], uint8_t next_hop[4])
+{
+    int on_link = 1;
+    for (int i = 0; i < 4; i++)
+        if ((ip[i] & our_mask[i]) != (our_ip[i] & our_mask[i]))
+            on_link = 0;
+    static const uint8_t zero4[4] = {0, 0, 0, 0};
+    if (!on_link && !ip_eq(our_gw, zero4))
+        ip_copy(next_hop, our_gw);
+    else
+        ip_copy(next_hop, ip);
+}
+
 /* ---- UDP: echo server on port 7 ---- */
 static void udp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
 {
@@ -318,6 +489,10 @@ static void udp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     uint16_t ulen = be16(udp + 4);
     if (ulen < 8 || ulen > avail)
         return;
+    if (be16(udp + 2) == 68) {   /* DHCP client port */
+        dhcp_input(udp, ulen);
+        return;
+    }
     if (be16(udp + 2) != 7)      /* echo port only */
         return;
     stat_udp_rx++;

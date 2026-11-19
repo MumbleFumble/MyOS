@@ -233,6 +233,8 @@ static void cmd_dmastat(void)
     puts_u("\r\n");
 }
 
+static void print_ip(const unsigned char ip[4]);
+
 /* Network status (Phase 7): MAC, link, frame counters. */
 static void puthex2(unsigned char v)
 {
@@ -256,6 +258,7 @@ static void cmd_netstat(void)
         puthex2(o.mac[i]);
     }
     puts_u(o.link ? " link=up" : " link=down");
+    puts_u(" ip="); print_ip(o.ip);
     puts_u(" rx="); puts_u(itoa((long)o.rx_frames, buf));
     puts_u(" tx="); puts_u(itoa((long)o.tx_frames, buf));
     puts_u(" irq="); puts_u(itoa((long)o.irq_rx, buf));
@@ -275,6 +278,16 @@ static void cmd_netsend(void)
     puts_u("netsent\r\n");
 }
 
+/* dhcp: obtain address/gateway/DNS via DHCP (Phase 8). */
+static void cmd_dhcp(void)
+{
+    struct dhcp_out o;
+    if (sys_dhcp(&o) != 0) { puts_u("dhcp: failed\r\n"); return; }
+    puts_u("dhcp: bound "); print_ip(o.ip);
+    puts_u(" gw "); print_ip(o.gw);
+    puts_u(" dns "); print_ip(o.dns);
+    puts_u("\r\n");
+}
 /* Parse "a.b.c.d" into ip[4]; 1 on success. */
 static int parse_ip(const char *s, unsigned char ip[4])
 {
@@ -529,6 +542,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "netstat")) { cmd_netstat(); puts_u("> "); continue; }
         if (streq(cmd, "netsend")) { cmd_netsend(); puts_u("> "); continue; }
         if (streq(cmd, "ping")) { cmd_ping(arg); puts_u("> "); continue; }
+        if (streq(cmd, "dhcp")) { cmd_dhcp(); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
         if (streq(cmd, "prefetch")) {
             long pi = -1;
@@ -608,7 +622,7 @@ void _start(long argc, char **argv)
         }
 
         if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
+            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, netstat, netsend, ping, dhcp, prefetch <0|1|2|3>, memtest, pf, clear, exit\r\n> ");
             continue;
         }
 

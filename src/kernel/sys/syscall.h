@@ -31,7 +31,8 @@
 #define SYS_FCREATE 26     /* fcreate(path) -> fd (create/truncate) */
 #define SYS_NETSTAT 27     /* netstat(out) -> 0 (Phase 7) */
 #define SYS_NETSEND 28     /* netsend() -> 0 or -1 (Phase 7 test frame) */
-#define SYS_PING 29        /* ping(ip_ptr, seq) -> rtt ticks or -1 (Phase 7) */     /* netsend() -> 0 or -1 (Phase 7 test frame) */     /* fcreate(path) -> fd (create/truncate) */  /* bcache_sync() -> 0 or -1 */
+#define SYS_PING 29        /* ping(ip_ptr, seq) -> rtt ticks or -1 (Phase 7) */
+#define SYS_DHCP 30        /* dhcp(out_ptr) -> 0 or -1 (Phase 8) */        /* ping(ip_ptr, seq) -> rtt ticks or -1 (Phase 7) */     /* netsend() -> 0 or -1 (Phase 7 test frame) */     /* fcreate(path) -> fd (create/truncate) */  /* bcache_sync() -> 0 or -1 */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

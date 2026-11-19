@@ -363,6 +363,8 @@ struct netstat_out {
     uint32_t udp_rx;
     uint32_t udp_tx;
     uint32_t irq_rx;
+    uint8_t  ip[4];
+    uint8_t  gw[4];
 };
 
 static int64_t sys_netstat(uint64_t out_va)
@@ -378,6 +380,8 @@ static int64_t sys_netstat(uint64_t out_va)
     net_stack_stats(&o->arp_rx, &o->arp_tx, &o->icmp_rx, &o->icmp_tx,
                     &o->udp_rx, &o->udp_tx);
     o->irq_rx = e1000_rx_irqs();
+    net_our_ip(o->ip);
+    net_gateway(o->gw);
     return 0;
 }
 
@@ -394,13 +398,15 @@ static int64_t sys_ping(uint64_t ip_va, uint64_t seq)
 {
     if (!ip_va) return -1;
     const uint8_t *ip = (const uint8_t *)ip_va;
+    uint8_t hop[4];
+    net_route_ip(ip, hop);
     uint8_t mac[6];
-    if (!net_arp_lookup(ip, mac)) {
-        net_arp_request(ip);
+    if (!net_arp_lookup(hop, mac)) {
+        net_arp_request(hop);
         int found = 0;
         for (int i = 0; i < 30 && !found; i++) {
             sched_block_current((uint64_t)timer_ticks() + 10);
-            found = net_arp_lookup(ip, mac);
+            found = net_arp_lookup(hop, mac);
         }
         if (!found) return -1;
     }
@@ -408,6 +414,40 @@ static int64_t sys_ping(uint64_t ip_va, uint64_t seq)
     for (int i = 0; i < 30; i++) {
         uint32_t rtt = 0;
         if (net_ping_result(&rtt) == 1) return (int64_t)rtt;
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return -1;
+}
+
+/* SYS_DHCP (Phase 8): run the DHCP exchange, blocking in 100 ms
+ * slices while the RX task collects the OFFER/ACK. On success
+ * fills the caller's dhcp_out and returns 0. */
+struct dhcp_out {
+    uint8_t ip[4];
+    uint8_t gw[4];
+    uint8_t mask[4];
+    uint8_t dns[4];
+};
+
+static int64_t sys_dhcp(uint64_t out_va)
+{
+    if (!out_va) return -1;
+    net_dhcp_start();
+    int offered = 0;
+    for (int i = 0; i < 40 && !offered; i++) {
+        if (net_dhcp_have_offer()) { offered = 1; break; }
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    if (!offered) return -1;
+    net_dhcp_request();
+    for (int i = 0; i < 40; i++) {
+        int st = net_dhcp_state();
+        if (st == 3) {
+            struct dhcp_out *o = (struct dhcp_out *)out_va;
+            net_dhcp_info(o->ip, o->gw, o->mask, o->dns);
+            return 0;
+        }
+        if (st < 0) return -1;
         sched_block_current((uint64_t)timer_ticks() + 10);
     }
     return -1;
@@ -515,6 +555,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_NETSTAT: return sys_netstat(arg1);
     case SYS_NETSEND: return sys_netsend();
     case SYS_PING: return sys_ping(arg1, arg2);
+    case SYS_DHCP: return sys_dhcp(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

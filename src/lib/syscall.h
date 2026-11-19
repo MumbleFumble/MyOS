@@ -140,10 +140,19 @@ struct netstat_out {
     unsigned int udp_rx;
     unsigned int udp_tx;
     unsigned int irq_rx;
+    unsigned char ip[4];
+    unsigned char gw[4];
 };
 long sys_netstat(struct netstat_out *out);
 long sys_netsend(void);
 long sys_ping(const unsigned char *ip, unsigned short seq);
+struct dhcp_out {
+    unsigned char ip[4];
+    unsigned char gw[4];
+    unsigned char mask[4];
+    unsigned char dns[4];
+};
+long sys_dhcp(struct dhcp_out *out);
 long sys_dma_stat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_wstat(unsigned long *dma, unsigned long *err, unsigned long *pio);
 long sys_raw_sector(unsigned long idx, void *buf, long is_write);

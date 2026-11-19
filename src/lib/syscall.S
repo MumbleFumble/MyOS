@@ -179,6 +179,12 @@ sys_ping:
     mov  rax, 29        /* SYS_PING */
     int  0x80
     ret
+/* long sys_dhcp(struct dhcp_out *out) */
+.global sys_dhcp
+sys_dhcp:
+    mov  rax, 30        /* SYS_DHCP */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
