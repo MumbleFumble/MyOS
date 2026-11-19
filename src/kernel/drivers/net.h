@@ -30,7 +30,8 @@ void net_dhcp_request(void);
 int  net_dhcp_state(void);       /* 0 idle, 1 discover, 2 request, 3 bound, -1 nak */
 int  net_dhcp_have_offer(void);
 void net_dhcp_info(uint8_t ip[4], uint8_t gw[4], uint8_t mask[4],
-                   uint8_t dns[4]);
+                   uint8_t dns[4], uint32_t *lease_secs,
+                   uint32_t *renewals);
 void net_our_ip(uint8_t out[4]);
 void net_gateway(uint8_t out[4]);
 /* Next hop for dst: gateway when off-link, else dst itself. */

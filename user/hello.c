@@ -282,11 +282,14 @@ static void cmd_netsend(void)
 /* dhcp: obtain address/gateway/DNS via DHCP (Phase 8). */
 static void cmd_dhcp(void)
 {
+    char buf[16];
     struct dhcp_out o;
     if (sys_dhcp(&o) != 0) { puts_u("dhcp: failed\r\n"); return; }
     puts_u("dhcp: bound "); print_ip(o.ip);
     puts_u(" gw "); print_ip(o.gw);
     puts_u(" dns "); print_ip(o.dns);
+    puts_u(" lease="); puts_u(itoa((long)o.lease_secs, buf));
+    puts_u("s renewals="); puts_u(itoa((long)o.renewals, buf));
     puts_u("\r\n");
 }
 /* Parse "a.b.c.d" into ip[4]; 1 on success. */

@@ -351,6 +351,12 @@ static uint8_t dhcp_server_ip[4];
 static uint8_t dhcp_opt_mask[4];
 static uint8_t dhcp_opt_gw[4];
 static uint8_t dhcp_opt_dns[4];
+static uint32_t dhcp_opt_lease = 0;    /* option 51 of the last message */
+/* Lease bookkeeping (Phase 11 inc.3): renewal at T1 = lease/2,
+ * rediscovery at T2 = 7/8 lease, driven by net_dhcp_tick(). */
+static uint32_t dhcp_lease_secs = 0;   /* 0 = no lease known */
+static uint32_t dhcp_bound_tick = 0;
+static uint32_t dhcp_renewals = 0;
 
 static void dhcp_send(uint8_t msg_type)
 {
@@ -388,8 +394,29 @@ void net_dhcp_start(void)
 {
     dhcp_xid = (uint32_t)timer_ticks() ^ 0x4D590000u;
     dhcp_have_offer = 0;
+    dhcp_lease_secs = 0;
+    dhcp_opt_lease = 0;
     dhcp_state = 1;
     dhcp_send(1);                          /* DISCOVER */
+}
+
+/* Periodic lease maintenance, called from the RX task loop. */
+void net_dhcp_tick(void)
+{
+    if ((dhcp_state != 3 && dhcp_state != 4) || dhcp_lease_secs == 0)
+        return;
+    uint32_t lease_ticks = dhcp_lease_secs * 100;   /* PIT is 100 Hz */
+    uint32_t elapsed = (uint32_t)timer_ticks() - dhcp_bound_tick;
+    if (dhcp_state == 3 && elapsed >= lease_ticks / 2) {
+        /* T1: ask the server to renew (broadcast REQUEST, as at
+         * bind time; servers that ACK the bind ACK this too). */
+        dhcp_xid = (uint32_t)timer_ticks() ^ 0x4D590000u;
+        ip_copy(dhcp_offer_ip, our_ip);
+        dhcp_state = 4;
+        dhcp_send(3);
+    } else if (dhcp_state == 4 && elapsed >= (lease_ticks * 7) / 8) {
+        net_dhcp_start();   /* T2: renewal unanswered, rediscover */
+    }
 }
 
 void net_dhcp_request(void)
@@ -433,6 +460,8 @@ static void dhcp_input(const uint8_t *udp, uint32_t ulen)
             ip_copy(dhcp_opt_gw, v);
         else if (code == 6 && ln >= 4)
             ip_copy(dhcp_opt_dns, v);
+        else if (code == 51 && ln >= 4)
+            dhcp_opt_lease = be32(v);
         o += 2 + ln;
     }
     if (msg_type == 2 && dhcp_state == 1) {          /* OFFER */
@@ -442,19 +471,33 @@ static void dhcp_input(const uint8_t *udp, uint32_t ulen)
         else
             ip_copy(dhcp_server_ip, p + 20);         /* siaddr */
         dhcp_have_offer = 1;
-    } else if (msg_type == 5 && dhcp_state == 2) {   /* ACK: commit */
+    } else if (msg_type == 5 && (dhcp_state == 2 || dhcp_state == 4)) {
+        /* ACK: commit (initial bind or a Phase 11 renewal). */
+        int renewing = (dhcp_state == 4);
         ip_copy(our_ip, p + 16);
         ip_copy(our_mask, dhcp_opt_mask);
         ip_copy(our_gw, dhcp_opt_gw);
         ip_copy(our_dns, dhcp_opt_dns);
+        dhcp_lease_secs = dhcp_opt_lease;
+        dhcp_bound_tick = (uint32_t)timer_ticks();
         dhcp_state = 3;
-        nputs("[net] dhcp bound ");
-        nputip(our_ip);
-        nputs(" gw ");
-        nputip(our_gw);
-        nputs("\r\n");
+        if (renewing) {
+            dhcp_renewals++;
+            nputs("[net] dhcp renewed lease ");
+            nputu(dhcp_lease_secs);
+            nputs("s\r\n");
+        } else {
+            nputs("[net] dhcp bound ");
+            nputip(our_ip);
+            nputs(" gw ");
+            nputip(our_gw);
+            nputs("\r\n");
+        }
     } else if (msg_type == 6) {                      /* NAK */
-        dhcp_state = -1;
+        if (dhcp_state == 4)
+            net_dhcp_start();   /* renewal refused: rediscover */
+        else
+            dhcp_state = -1;
     }
 }
 
@@ -462,12 +505,15 @@ void net_our_ip(uint8_t out[4]) { ip_copy(out, our_ip); }
 void net_gateway(uint8_t out[4]) { ip_copy(out, our_gw); }
 
 void net_dhcp_info(uint8_t ip[4], uint8_t gw[4], uint8_t mask[4],
-                   uint8_t dns[4])
+                   uint8_t dns[4], uint32_t *lease_secs,
+                   uint32_t *renewals)
 {
     ip_copy(ip, our_ip);
     ip_copy(gw, our_gw);
     ip_copy(mask, our_mask);
     ip_copy(dns, our_dns);
+    *lease_secs = dhcp_lease_secs;
+    *renewals = dhcp_renewals;
 }
 
 /* Next hop for a destination: the gateway when off-link and one is
@@ -495,10 +541,41 @@ void net_route_ip(const uint8_t ip[4], uint8_t next_hop[4])
 static volatile int dns_state = 0;   /* 0 idle, 1 waiting, 2 done, -1 error */
 static uint16_t dns_id = 0;
 static uint8_t dns_result_ip[4];
+static char dns_qname[128];
+
+/* Answer cache (Phase 11 inc.3): 8 entries, TTL from the answer
+ * (capped at 24 h), round-robin replacement. A hit completes the
+ * query in net_dns_begin without sending a packet. */
+#define DNS_CACHE_N 8
+struct dns_ent { char name[128]; uint8_t ip[4]; uint32_t expiry; };
+static struct dns_ent dns_cache[DNS_CACHE_N];
+static int dns_cache_pos = 0;
+
+static int dns_name_eq(const char *a, const char *b)
+{
+    for (int i = 0; i < 127; i++) {
+        if (a[i] != b[i]) return 0;
+        if (!a[i]) return 1;
+    }
+    return 1;
+}
 
 int net_dns_begin(const char *name, const uint8_t server_ip[4],
                   const uint8_t server_mac[6])
 {
+    int ni = 0;
+    while (name[ni] && ni < 127) { dns_qname[ni] = name[ni]; ni++; }
+    dns_qname[ni] = 0;
+    uint32_t now = (uint32_t)timer_ticks();
+    for (int i = 0; i < DNS_CACHE_N; i++) {
+        if (dns_cache[i].name[0]
+            && dns_name_eq(dns_cache[i].name, name)
+            && (int32_t)(dns_cache[i].expiry - now) > 0) {
+            ip_copy(dns_result_ip, dns_cache[i].ip);
+            dns_state = 2;
+            return 0;   /* cache hit: no packet sent */
+        }
+    }
     static uint8_t q[320];
     uint16_t id = (uint16_t)(timer_ticks() ^ 0xD355u);
     q[0] = (uint8_t)(id >> 8); q[1] = (uint8_t)id;
@@ -579,12 +656,23 @@ static void dns_input(const uint8_t *udp, uint32_t ulen)
             return;
         }
         uint16_t type = be16(p + o);
+        uint32_t ttl = be32(p + o + 4);
         uint16_t rdlen = be16(p + o + 8);
         o += 10;
         if (o + rdlen > len) { dns_state = -1; return; }
         if (type == 1 && rdlen == 4) {
             ip_copy(dns_result_ip, p + o);
             dns_state = 2;
+            if (ttl > 0) {   /* cache the answer (Phase 11) */
+                if (ttl > 86400) ttl = 86400;
+                struct dns_ent *e = &dns_cache[dns_cache_pos];
+                dns_cache_pos = (dns_cache_pos + 1) % DNS_CACHE_N;
+                int ci = 0;
+                while (dns_qname[ci] && ci < 127) { e->name[ci] = dns_qname[ci]; ci++; }
+                e->name[ci] = 0;
+                ip_copy(e->ip, p + o);
+                e->expiry = (uint32_t)timer_ticks() + ttl * 100;
+            }
             return;
         }
         o += rdlen;
@@ -963,6 +1051,7 @@ void net_rx_task(void)
     uint16_t len;
     e1000_set_rx_task(sched_current_task());
     for (;;) {
+        net_dhcp_tick();
         int got = 0;
         while (e1000_recv(frame, &len)) {
             got = 1;

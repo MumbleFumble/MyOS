@@ -152,6 +152,8 @@ struct dhcp_out {
     unsigned char gw[4];
     unsigned char mask[4];
     unsigned char dns[4];
+    unsigned int lease_secs;
+    unsigned int renewals;
 };
 long sys_dhcp(struct dhcp_out *out);
 struct tcpecho_args {

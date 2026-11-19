@@ -436,6 +436,8 @@ struct dhcp_out {
     uint8_t gw[4];
     uint8_t mask[4];
     uint8_t dns[4];
+    uint32_t lease_secs;
+    uint32_t renewals;
 };
 
 static int64_t sys_dhcp(uint64_t out_va)
@@ -453,7 +455,8 @@ static int64_t sys_dhcp(uint64_t out_va)
         int st = net_dhcp_state();
         if (st == 3) {
             struct dhcp_out *o = (struct dhcp_out *)out_va;
-            net_dhcp_info(o->ip, o->gw, o->mask, o->dns);
+            net_dhcp_info(o->ip, o->gw, o->mask, o->dns,
+                          &o->lease_secs, &o->renewals);
             return 0;
         }
         if (st < 0) return -1;
