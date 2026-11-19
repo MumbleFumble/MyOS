@@ -375,6 +375,7 @@ void net_rx_task(void)
 {
     uint8_t frame[2048];
     uint16_t len;
+    e1000_set_rx_task(sched_current_task());
     for (;;) {
         int got = 0;
         while (e1000_recv(frame, &len)) {
@@ -382,7 +383,9 @@ void net_rx_task(void)
             net_input(frame, len);
         }
         if (!got)
-            sched_block_current((uint64_t)timer_ticks() + 2);
+            /* IRQ wakes us on arrival; the 50-tick deadline is a
+             * fallback poll in case an interrupt is ever lost. */
+            sched_block_current_io((uint64_t)timer_ticks() + 50);
     }
 }
 

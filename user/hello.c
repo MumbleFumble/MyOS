@@ -258,6 +258,7 @@ static void cmd_netstat(void)
     puts_u(o.link ? " link=up" : " link=down");
     puts_u(" rx="); puts_u(itoa((long)o.rx_frames, buf));
     puts_u(" tx="); puts_u(itoa((long)o.tx_frames, buf));
+    puts_u(" irq="); puts_u(itoa((long)o.irq_rx, buf));
     puts_u("\r\n");
     puts_u("arp rx="); puts_u(itoa((long)o.arp_rx, buf));
     puts_u(" tx="); puts_u(itoa((long)o.arp_tx, buf));

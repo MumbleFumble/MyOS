@@ -362,6 +362,7 @@ struct netstat_out {
     uint32_t icmp_tx;
     uint32_t udp_rx;
     uint32_t udp_tx;
+    uint32_t irq_rx;
 };
 
 static int64_t sys_netstat(uint64_t out_va)
@@ -376,6 +377,7 @@ static int64_t sys_netstat(uint64_t out_va)
     e1000_stats(&o->rx_frames, &o->tx_frames);
     net_stack_stats(&o->arp_rx, &o->arp_tx, &o->icmp_rx, &o->icmp_tx,
                     &o->udp_rx, &o->udp_tx);
+    o->irq_rx = e1000_rx_irqs();
     return 0;
 }
 

@@ -10,6 +10,7 @@
  */
 #include "e1000.h"
 #include "../arch/port_io.h"
+#include "../arch/idt.h"
 #include "../arch/timer.h"
 #include "../proc/sched.h"
 #include "../mem/vmm.h"
@@ -98,6 +99,9 @@ static uint8_t  net_mac[6];
 static uint32_t rx_next = 0;
 static uint32_t tx_next = 0;
 static uint64_t stat_rx = 0, stat_tx = 0;
+static struct task *rx_task = 0;
+static volatile uint32_t stat_rx_irqs = 0;
+static int nic_irq = -1;
 
 static uint32_t reg_read(uint32_t off) { return mmio[off / 4]; }
 static void reg_write(uint32_t off, uint32_t val) { mmio[off / 4] = val; }
@@ -142,6 +146,31 @@ static uint16_t eeprom_read(uint8_t addr)
     do { v = reg_read(REG_EERD); } while (!(v & (1u << 4)) && --guard);
     return (uint16_t)(v >> 16);
 }
+
+#define IMS_LSC  (1u << 2)
+#define IMS_RXT0 (1u << 7)
+#define ICR_LSC  (1u << 2)
+#define ICR_RXT0 (1u << 7)
+
+/* IRQ handler: reading ICR clears the interrupt causes. Never call
+ * sched_tick here (not reentrant); wake the RX task and flag a
+ * reschedule, exactly like the ATA IRQ14 handler. */
+static void e1000_irq_handler(void)
+{
+    uint32_t icr = reg_read(REG_ICR);
+    if (icr & ICR_LSC)
+        reg_write(REG_CTRL, reg_read(REG_CTRL) | CTRL_SLU | CTRL_ASDE);
+    if (icr & ICR_RXT0) {
+        stat_rx_irqs++;
+        if (rx_task && rx_task->state == TASK_BLOCKED) {
+            sched_wake_io(rx_task);
+            sched_request_resched();
+        }
+    }
+}
+
+void e1000_set_rx_task(struct task *t) { rx_task = t; }
+uint32_t e1000_rx_irqs(void) { return stat_rx_irqs; }
 
 int e1000_init(void)
 {
@@ -230,6 +259,23 @@ int e1000_init(void)
 
     /* Link up. */
     reg_write(REG_CTRL, reg_read(REG_CTRL) | CTRL_SLU | CTRL_ASDE);
+
+    /* IRQ-driven RX (Phase 8 inc.1): if the PCI interrupt line is
+     * valid, install the handler, unmask the PIC line (cascade too
+     * for slave IRQs) and enable RX + link interrupts. Otherwise the
+     * RX task's timed block still polls as a fallback. */
+    uint32_t iline = e1000_pci_read32(fdev, ffn, 0x3C) & 0xFF;
+    if (iline < 16) {
+        nic_irq = (int)iline;
+        irq_install_handler(nic_irq, e1000_irq_handler);
+        if (nic_irq < 8) {
+            outb(0x21, (uint8_t)(inb(0x21) & ~(1u << nic_irq)));
+        } else {
+            outb(0x21, (uint8_t)(inb(0x21) & ~(1u << 2)));
+            outb(0xA1, (uint8_t)(inb(0xA1) & ~(1u << (nic_irq - 8))));
+        }
+        reg_write(REG_IMS, IMS_LSC | IMS_RXT0);
+    }
 
     net_present = 1;
     return 0;

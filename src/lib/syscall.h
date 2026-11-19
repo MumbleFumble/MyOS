@@ -139,6 +139,7 @@ struct netstat_out {
     unsigned int icmp_tx;
     unsigned int udp_rx;
     unsigned int udp_tx;
+    unsigned int irq_rx;
 };
 long sys_netstat(struct netstat_out *out);
 long sys_netsend(void);

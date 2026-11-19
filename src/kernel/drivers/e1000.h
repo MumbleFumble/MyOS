@@ -21,3 +21,9 @@ int  e1000_recv(uint8_t *out, uint16_t *len_out);
 int  e1000_send_hello(void);
 
 void e1000_stats(uint64_t *rx_frames, uint64_t *tx_frames);
+
+/* Phase 8: IRQ-driven RX. The RX task registers itself so the IRQ
+ * handler can wake it; e1000_rx_irqs() counts RXT0 interrupts. */
+struct task;
+void e1000_set_rx_task(struct task *t);
+uint32_t e1000_rx_irqs(void);

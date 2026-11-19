@@ -84,6 +84,9 @@ wait_for_count "HOST-TO-MYOS-42" 1 60 || fail "guest never logged the peer frame
 for i in $(seq 1 30); do [ -f "$RESULT" ] && break; sleep 1; done
 grep -q "PEER OK" "$RESULT" 2>/dev/null || fail "peer verdict: $(cat "$RESULT" 2>/dev/null || echo none)"
 
-echo "[test] PASS: e1000 raw TX+RX over socket backend"
+printf '%s\n' "netstat" | send_cmds
+wait_for_count "irq=[1-9]" 1 30 || fail "no RX interrupts counted (IRQ path dead?)"
+
+echo "[test] PASS: e1000 raw TX+RX over socket backend (IRQ-driven RX)"
 kill -9 "$QPID" "$PEERPID" 2>/dev/null
 exit 0
