@@ -269,6 +269,7 @@ static void cmd_netstat(void)
     puts_u(" tx="); puts_u(itoa((long)o.icmp_tx, buf));
     puts_u(" udp rx="); puts_u(itoa((long)o.udp_rx, buf));
     puts_u(" tx="); puts_u(itoa((long)o.udp_tx, buf));
+    puts_u(" badck="); puts_u(itoa((long)o.bad_cksum, buf));
     puts_u("\r\n");
 }
 

@@ -24,6 +24,7 @@ static uint8_t our_dns[4]  = {0, 0, 0, 0};
 static uint32_t stat_arp_rx = 0, stat_arp_tx = 0;
 static uint32_t stat_icmp_rx = 0, stat_icmp_tx = 0;
 static uint32_t stat_udp_rx = 0, stat_udp_tx = 0;
+static uint32_t stat_bad_cksum = 0;   /* Phase 11: dropped on checksum */
 static uint16_t ip_id_counter = 1;
 
 /* Outstanding ping state (written by the pinging task, completed by
@@ -84,6 +85,9 @@ static uint16_t cksum(const uint8_t *p, uint32_t n)
         sum = (sum & 0xFFFF) + (sum >> 16);
     return (uint16_t)~sum;
 }
+
+static uint16_t l4_cksum(const uint8_t *src, const uint8_t *dst,
+                         uint8_t proto, const uint8_t *seg, uint32_t len);
 
 /* ---- tiny serial logger (COM1), same idiom as e1000.c ---- */
 static void nputc(char c)
@@ -262,6 +266,10 @@ static void icmp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     uint32_t icmp_len = (uint32_t)ip_total - ihl;
     if (len < 14 + ihl + 8 || icmp_len < 8)
         return;
+    if (cksum(icmp, icmp_len) != 0) {   /* Phase 11: verify */
+        stat_bad_cksum++;
+        return;
+    }
 
     if (icmp[0] == 0) {          /* echo reply: match the pending ping */
         if (ping_pending && be16(icmp + 4) == PING_ID
@@ -598,6 +606,11 @@ static void udp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     uint16_t ulen = be16(udp + 4);
     if (ulen < 8 || ulen > avail)
         return;
+    if (be16(udp + 6) != 0      /* 0 = no checksum, legal in IPv4 */
+        && l4_cksum(ip + 12, ip + 16, 17, udp, ulen) != 0) {
+        stat_bad_cksum++;       /* Phase 11: verify */
+        return;
+    }
     if (be16(udp + 2) == 68) {   /* DHCP client port */
         dhcp_input(udp, ulen);
         return;
@@ -637,6 +650,13 @@ static void ipv4_input(const uint8_t *f, uint16_t len)
     uint16_t total = be16(ip + 2);
     if (total < 20 || 14 + total > len)
         return;
+    uint32_t ihl = (uint32_t)(ip[0] & 0x0F) * 4;
+    if (ihl < 20 || 14 + ihl > len)
+        return;
+    if (cksum(ip, ihl) != 0) {   /* Phase 11: verify header checksum */
+        stat_bad_cksum++;
+        return;
+    }
     static const uint8_t bcast_ip[4] = {255, 255, 255, 255};
     if (!ip_eq(ip + 16, our_ip) && !ip_eq(ip + 16, bcast_ip))
         return;
@@ -693,15 +713,19 @@ static struct {
     uint32_t last_send;
 } tcp;
 
-static uint16_t tcp_checksum(const uint8_t *src, const uint8_t *dst,
-                             const uint8_t *seg, uint32_t len)
+/* One's-complement checksum over the pseudo-header + segment.
+ * For sending, call with the segment's checksum field zeroed. For
+ * receive verification, call over the segment as received (checksum
+ * field included): a valid segment returns 0. */
+static uint16_t l4_cksum(const uint8_t *src, const uint8_t *dst,
+                         uint8_t proto, const uint8_t *seg, uint32_t len)
 {
     uint32_t sum = 0;
     sum += (uint16_t)((src[0] << 8) | src[1]);
     sum += (uint16_t)((src[2] << 8) | src[3]);
     sum += (uint16_t)((dst[0] << 8) | dst[1]);
     sum += (uint16_t)((dst[2] << 8) | dst[3]);
-    sum += 6;
+    sum += proto;
     sum += len;
     uint32_t i = 0;
     for (; i + 1 < len; i += 2)
@@ -711,6 +735,12 @@ static uint16_t tcp_checksum(const uint8_t *src, const uint8_t *dst,
     while (sum >> 16)
         sum = (sum & 0xFFFF) + (sum >> 16);
     return (uint16_t)~sum;
+}
+
+static uint16_t tcp_checksum(const uint8_t *src, const uint8_t *dst,
+                             const uint8_t *seg, uint32_t len)
+{
+    return l4_cksum(src, dst, 6, seg, len);
 }
 
 static void tcp_send_raw(const uint8_t *dst_mac, const uint8_t *dst_ip,
@@ -857,6 +887,10 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     uint8_t flags = t[13];
     const uint8_t *src_ip = ip + 12;
 
+    if (l4_cksum(src_ip, ip + 16, 6, t, seg_len) != 0) {
+        stat_bad_cksum++;   /* Phase 11: drop silently, not even an RST */
+        return;
+    }
     if (tcp.state == TCP_CLOSED) {
         if (flags & TCP_F_RST)
             return;
@@ -943,7 +977,8 @@ void net_rx_task(void)
 
 void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
                      uint32_t *icmp_rx, uint32_t *icmp_tx,
-                     uint32_t *udp_rx, uint32_t *udp_tx)
+                     uint32_t *udp_rx, uint32_t *udp_tx,
+                     uint32_t *bad_cksum)
 {
     *arp_rx = stat_arp_rx;
     *arp_tx = stat_arp_tx;
@@ -951,4 +986,5 @@ void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
     *icmp_tx = stat_icmp_tx;
     *udp_rx = stat_udp_rx;
     *udp_tx = stat_udp_tx;
+    *bad_cksum = stat_bad_cksum;
 }

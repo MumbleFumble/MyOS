@@ -142,6 +142,7 @@ struct netstat_out {
     unsigned int irq_rx;
     unsigned char ip[4];
     unsigned char gw[4];
+    unsigned int bad_cksum;
 };
 long sys_netstat(struct netstat_out *out);
 long sys_netsend(void);

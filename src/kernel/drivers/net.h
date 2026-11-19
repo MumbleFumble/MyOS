@@ -59,4 +59,5 @@ void net_tcp_retransmit(void);
 
 void net_stack_stats(uint32_t *arp_rx, uint32_t *arp_tx,
                      uint32_t *icmp_rx, uint32_t *icmp_tx,
-                     uint32_t *udp_rx, uint32_t *udp_tx);
+                     uint32_t *udp_rx, uint32_t *udp_tx,
+                     uint32_t *bad_cksum);

@@ -365,6 +365,7 @@ struct netstat_out {
     uint32_t irq_rx;
     uint8_t  ip[4];
     uint8_t  gw[4];
+    uint32_t bad_cksum;
 };
 
 static int64_t sys_netstat(uint64_t out_va)
@@ -378,7 +379,7 @@ static int64_t sys_netstat(uint64_t out_va)
     if (o->present) e1000_mac_addr(o->mac);
     e1000_stats(&o->rx_frames, &o->tx_frames);
     net_stack_stats(&o->arp_rx, &o->arp_tx, &o->icmp_rx, &o->icmp_tx,
-                    &o->udp_rx, &o->udp_tx);
+                    &o->udp_rx, &o->udp_tx, &o->bad_cksum);
     o->irq_rx = e1000_rx_irqs();
     net_our_ip(o->ip);
     net_gateway(o->gw);
