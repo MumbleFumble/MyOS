@@ -641,7 +641,8 @@ static int64_t sys_prefetch_policy(uint64_t index)
 /* SYS_PFWEIGHTS (Phase 10): inspect or reset the learned
  * prefetch weights. mode 0 copies {int32 w[13]; uint32 pos, neg}
  * to the caller; mode 1 zeroes the weights; mode 2 reseeds them
- * from the trained values. */
+ * from the trained values; mode 3 saves them to pfweights.bin
+ * on disk (inc.3). */
 struct pfweights_out {
     int32_t w[13];
     uint32_t pos;
@@ -658,6 +659,7 @@ static int64_t sys_pfweights(uint64_t mode, uint64_t out_va)
     }
     if (mode == 1) { prefetch_weights_zero(); return 0; }
     if (mode == 2) { prefetch_weights_seed(); return 0; }
+    if (mode == 3) { return prefetch_weights_save(); }
     return -1;
 }
 

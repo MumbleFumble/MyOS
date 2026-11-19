@@ -1,5 +1,6 @@
 #include "prefetch.h"
 #include "bcache.h"
+#include "vfs.h"
 
 /* -----------------------------------------------------------------------
  * Prefetch policies (Phase 3, increment 4).
@@ -185,6 +186,20 @@ static int32_t lw[L_NW] = {
 static int l_online = 0;
 static uint32_t l_upd_pos = 0, l_upd_neg = 0;
 
+/* Phase 10 inc.3: persisted "home" weights (defined at the bottom of
+ * this file). The online policy seeds from lw_home, which l_load_home
+ * fills from pfweights.bin when it exists; otherwise the trained
+ * values. l_loading guards on_access against the load's own VFS
+ * reads. */
+#define PFW_MAGIC 0x50574631u   /* "PWF1" */
+static int32_t lw_home[L_NW] = {
+    PW_BIAS, PW_IS_NEXT, PW_STRIDE_CONFIRMED, PW_STRIDE_UNCONF,
+    PW_SEQ_RUN, PW_DIST, PW_RECENT_ACC, PW_REUSE, PW_JUMP,
+    PW_STREAM_CONT, PW_FILE_SEQ, PW_FILE_SEQ_OTHER, PW_FILE_STRIDE
+};
+static int l_home_tried = 0;
+static int l_loading = 0;
+
 static uint32_t l_prev1, l_prev2;
 static int l_has1, l_has2;
 static uint32_t l_hist[L_HIST];     /* previous accesses, oldest first */
@@ -341,12 +356,15 @@ static void learned_reset(void)
         lw[i] = lw_seed[i];
 }
 
+static void l_load_home(void);
+
 static void learned_online_reset(void)
 {
     learned_reset_common();
     l_online = 1;
+    l_load_home();
     for (int i = 0; i < L_NW; i++)
-        lw[i] = lw_seed[i];
+        lw[i] = lw_home[i];
 }
 
 /* Fixed-point feature value for distance: 1024 / (1 + floor(log2(a))). */
@@ -362,6 +380,8 @@ static void learned_on_access(uint32_t lba, int hit, uint32_t file_id,
                               uint32_t file_off)
 {
     (void)hit;
+    if (l_loading)
+        return;   /* VFS reads from the weight load must not recurse */
     l_index++;
     if (l_online) {
         if (!l_tab_ready)
@@ -582,6 +602,72 @@ void prefetch_weights_zero(void)
 
 void prefetch_weights_seed(void)
 {
+    if (l_online) {
+        l_load_home();
+        for (int i = 0; i < L_NW; i++)
+            lw[i] = lw_home[i];
+    } else {
+        for (int i = 0; i < L_NW; i++)
+            lw[i] = lw_seed[i];
+    }
+}
+
+/* Phase 10 inc.3: weight persistence. pfweights.bin on the MyFS disk
+ * holds {magic, 13 x int32 LE}. The online policy seeds from it (via
+ * lw_home) so learning survives reboots; the frozen policy always
+ * seeds from the trained weights and is unaffected. */
+static void l_load_home(void)
+{
+    if (l_home_tried)
+        return;
+    l_home_tried = 1;
+    l_loading = 1;
+    vfs_node_t *n = vfs_open("pfweights.bin");
+    if (n) {
+        uint8_t buf[4 + 4 * L_NW];
+        if (vfs_read(n, 0, sizeof(buf), buf) == (int64_t)sizeof(buf)) {
+            uint32_t magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8)
+                           | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+            if (magic == PFW_MAGIC) {
+                for (int i = 0; i < L_NW; i++) {
+                    const uint8_t *b = &buf[4 + 4 * i];
+                    int32_t w = (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8)
+                                | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+                    if (w > 8192) w = 8192;
+                    if (w < -8192) w = -8192;
+                    lw_home[i] = w;
+                }
+            }
+        }
+        vfs_close(n);
+    }
+    l_loading = 0;
+}
+
+int prefetch_weights_save(void)
+{
+    uint8_t buf[4 + 4 * L_NW];
+    buf[0] = (uint8_t)(PFW_MAGIC & 0xFF);
+    buf[1] = (uint8_t)((PFW_MAGIC >> 8) & 0xFF);
+    buf[2] = (uint8_t)((PFW_MAGIC >> 16) & 0xFF);
+    buf[3] = (uint8_t)((PFW_MAGIC >> 24) & 0xFF);
+    for (int i = 0; i < L_NW; i++) {
+        uint32_t w = (uint32_t)lw[i];
+        buf[4 + 4 * i + 0] = (uint8_t)(w & 0xFF);
+        buf[4 + 4 * i + 1] = (uint8_t)((w >> 8) & 0xFF);
+        buf[4 + 4 * i + 2] = (uint8_t)((w >> 16) & 0xFF);
+        buf[4 + 4 * i + 3] = (uint8_t)((w >> 24) & 0xFF);
+    }
+    vfs_node_t *n = vfs_create("pfweights.bin");
+    if (!n)
+        return -1;
+    int64_t put = vfs_write(n, 0, sizeof(buf), buf);
+    vfs_close(n);
+    if (put != (int64_t)sizeof(buf))
+        return -1;
+    bcache_sync();
     for (int i = 0; i < L_NW; i++)
-        lw[i] = lw_seed[i];
+        lw_home[i] = lw[i];
+    l_home_tried = 1;
+    return 0;
 }

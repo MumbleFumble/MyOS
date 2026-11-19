@@ -623,6 +623,11 @@ static void cmd_pfweights(const char *arg)
         puts_u("pfweights: reseeded\r\n");
         return;
     }
+    if (streq(arg, "save")) {
+        long r = sys_pfweights(3, 0);
+        puts_u(r == 0 ? "pfweights: saved\r\n" : "pfweights: save failed\r\n");
+        return;
+    }
     struct pfweights_out o;
     if (sys_pfweights(0, &o) != 0) { puts_u("pfweights: failed\r\n"); return; }
     for (int i = 0; i < 13; i++) {

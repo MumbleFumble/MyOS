@@ -48,5 +48,6 @@ void prefetch_on_access(uint32_t lba, int hit, uint32_t file_id,
 void prefetch_weights_read(int32_t out[PF_NWEIGHTS], uint32_t *pos,
                            uint32_t *neg);
 void prefetch_weights_zero(void);
+int prefetch_weights_save(void);
 void prefetch_weights_seed(void);
 
