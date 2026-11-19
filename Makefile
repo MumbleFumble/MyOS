@@ -32,6 +32,7 @@ USER_BENCH_FILES_ELF := build/user/bench_files.elf
 USER_WTEST_ELF     := build/user/wtest.elf
 USER_WTESTW_ELF    := build/user/wtestw.elf
 USER_WTESTV_ELF    := build/user/wtestv.elf
+USER_ARGTEST_ELF   := build/user/argtest.elf
 
 SRC_DIR    := src
 # First collect all C files
@@ -66,6 +67,13 @@ $(USER_BENCH_IO_ELF): user/bench_io.c src/lib/syscall.S src/lib/malloc.c user/us
 	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
 	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
 	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/bench_io.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_ARGTEST_ELF): user/argtest.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/argtest.c  -o build/user/argtest.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/argtest.o build/user/syscall_u.o build/user/malloc_u.o
 
 $(USER_WTEST_ELF): user/wtest.c src/lib/syscall.S src/lib/malloc.c user/user.ld
 	@mkdir -p $(dir $@)
@@ -157,12 +165,12 @@ iso: $(KERNEL_ELF) disk
 	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(ISO_IMAGE) $(ISO_DIR)
 
 # Build the MyFS disk image from all files in disk_files/
-disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF)
+disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF)
 	@mkdir -p $(dir $(DISK_IMAGE))
 	@if [ -d $(DISK_FILES_DIR) ] && [ "$$(ls -A $(DISK_FILES_DIR) 2>/dev/null)" ]; then \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF); \
 	else \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF); \
 	fi
 
 run: iso

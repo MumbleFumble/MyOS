@@ -815,7 +815,13 @@ void _start(long argc, char **argv)
 
         if (streq(cmd, "exec")) {
             if (!arg[0]) { puts_u("usage: exec <prog> [args]\r\n> "); continue; }
-            long pid = sys_exec(arg, arg);
+            /* Program name is the first token; the full line
+             * (Phase 11 inc.4) becomes the child argv. */
+            char prog[64];
+            int pi2 = 0;
+            while (arg[pi2] && arg[pi2] != ' ' && pi2 < 63) { prog[pi2] = arg[pi2]; pi2++; }
+            prog[pi2] = 0;
+            long pid = sys_exec(prog, arg);
             if (pid < 0) { puts_u("exec: failed\r\n> "); continue; }
             sys_wait(pid);
             puts_u("> ");

@@ -7,6 +7,22 @@
 .code64
 .intel_syntax noprefix
 
+/* Process entry point (Phase 11 inc.4). The kernel ELF loader
+ * builds a System V initial stack (argc at [rsp], argv pointers
+ * above it), but a C _start expects argc/argv in rdi/rsi. _entry
+ * bridges the two and is the ELF entry of every user program.
+ * If _start returns, exit(0). */
+.global _entry
+_entry:
+    mov  rdi, [rsp]         /* argc */
+    lea  rsi, [rsp + 8]     /* argv */
+    xor  rbp, rbp
+    call _start
+    xor  rdi, rdi
+    mov  rax, 2             /* SYS_EXIT */
+    int  0x80
+    ud2
+
 /* long sys_write(long fd, const void *buf, long count) */
 .global sys_write
 sys_write:
