@@ -771,12 +771,14 @@ void net_input(const uint8_t *f, uint16_t len)
 }
 
 
-/* ---- TCP client (Phase 9 inc.2) ----
- * One connection at a time, client side only. In-order delivery
- * only (out-of-order segments get a duplicate ACK and are dropped),
- * one unacked data segment with timer-driven retransmit driven by
- * the blocking syscall's wait loop (net_tcp_retransmit). The RX
- * task feeds tcp_input(); SYS_TCPECHO orchestrates the exchange. */
+/* ---- TCP (Phase 9 inc.2; connection table Phase 12 inc.1) ----
+ * Per-connection state lives in a fixed table of TCP_MAX_CONN
+ * slots; the client path (SYS_TCPECHO) allocates one slot and is
+ * remembered as tcp_cur. Segment input demuxes by 4-tuple across
+ * the table. In-order delivery only (out-of-order segments get a
+ * duplicate ACK and are dropped), one unacked data segment with
+ * timer-driven retransmit driven by the blocking syscall's wait
+ * loop (net_tcp_retransmit). The RX task feeds tcp_input(). */
 #define TCP_RX_CAP 2048
 #define TCP_TX_CAP 1024
 #define TCP_F_FIN 0x01
@@ -786,7 +788,8 @@ void net_input(const uint8_t *f, uint16_t len)
 #define TCP_F_ACK 0x10
 enum { TCP_CLOSED = 0, TCP_SYN_SENT, TCP_ESTABLISHED, TCP_FIN_WAIT,
        TCP_CLOSE_WAIT, TCP_LAST_ACK };
-static struct {
+#define TCP_MAX_CONN 4
+struct tcp_conn {
     int state;
     uint8_t peer_ip[4];
     uint8_t peer_mac[6];
@@ -799,7 +802,11 @@ static struct {
     uint32_t fin_seq;
     int fin_queued, peer_fin, error;
     uint32_t last_send;
-} tcp;
+};
+static struct tcp_conn tcp_conns[TCP_MAX_CONN];
+/* The client connection in use by SYS_TCPECHO, or NULL. Slots in
+ * state TCP_CLOSED are free. */
+static struct tcp_conn *tcp_cur;
 
 /* One's-complement checksum over the pseudo-header + segment.
  * For sending, call with the segment's checksum field zeroed. For
@@ -852,81 +859,95 @@ static void tcp_send_raw(const uint8_t *dst_mac, const uint8_t *dst_ip,
     send_ipv4(dst_mac, dst_ip, 6, seg, (uint16_t)(20 + dlen));
 }
 
-static void tcp_send_seg(uint8_t flags, const uint8_t *data, uint32_t dlen)
+static void tcp_send_seg(struct tcp_conn *c, uint8_t flags,
+                         const uint8_t *data, uint32_t dlen)
 {
-    tcp_send_raw(tcp.peer_mac, tcp.peer_ip, tcp.local_port, tcp.peer_port,
-                 tcp.snd_nxt, tcp.rcv_nxt, flags, data, dlen);
-    tcp.last_send = (uint32_t)timer_ticks();
+    tcp_send_raw(c->peer_mac, c->peer_ip, c->local_port, c->peer_port,
+                 c->snd_nxt, c->rcv_nxt, flags, data, dlen);
+    c->last_send = (uint32_t)timer_ticks();
 }
 
 void net_tcp_reset(void)
 {
-    tcp.state = TCP_CLOSED;
-    tcp.rx_len = 0;
-    tcp.tx_len = 0;
-    tcp.fin_queued = 0;
-    tcp.peer_fin = 0;
-    tcp.error = 0;
+    struct tcp_conn *c = tcp_cur ? tcp_cur : &tcp_conns[0];
+    tcp_cur = c;
+    c->state = TCP_CLOSED;
+    c->rx_len = 0;
+    c->tx_len = 0;
+    c->fin_queued = 0;
+    c->peer_fin = 0;
+    c->error = 0;
 }
 
 int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
 {
-    if (tcp.state != TCP_CLOSED)
+    struct tcp_conn *c = 0;
+    for (int i = 0; i < TCP_MAX_CONN; i++)
+        if (tcp_conns[i].state == TCP_CLOSED) { c = &tcp_conns[i]; break; }
+    if (!c)
         return -1;
-    ip_copy(tcp.peer_ip, ip);
-    mac_copy(tcp.peer_mac, mac);
-    tcp.peer_port = port;
-    tcp.local_port = (uint16_t)(49152 + (timer_ticks() & 0x3FF));
-    tcp.snd_una = tcp.snd_nxt = (uint32_t)timer_ticks() ^ 0x5EED0000u;
-    tcp.rcv_nxt = 0;
-    tcp.rx_len = 0;
-    tcp.tx_len = 0;
-    tcp.fin_queued = 0;
-    tcp.peer_fin = 0;
-    tcp.error = 0;
-    tcp.state = TCP_SYN_SENT;
-    tcp_send_seg(TCP_F_SYN, 0, 0);
-    tcp.snd_nxt++;   /* SYN consumes a sequence number */
+    tcp_cur = c;
+    ip_copy(c->peer_ip, ip);
+    mac_copy(c->peer_mac, mac);
+    c->peer_port = port;
+    c->local_port = (uint16_t)(49152 + (timer_ticks() & 0x3FF));
+    c->snd_una = c->snd_nxt = (uint32_t)timer_ticks() ^ 0x5EED0000u;
+    c->rcv_nxt = 0;
+    c->rx_len = 0;
+    c->tx_len = 0;
+    c->fin_queued = 0;
+    c->peer_fin = 0;
+    c->error = 0;
+    c->state = TCP_SYN_SENT;
+    tcp_send_seg(c, TCP_F_SYN, 0, 0);
+    c->snd_nxt++;   /* SYN consumes a sequence number */
     return 0;
 }
 
-int net_tcp_state(void) { return tcp.state; }
-int net_tcp_error(void) { return tcp.error; }
-int net_tcp_acked(void) { return tcp.tx_len == 0 && !tcp.fin_queued; }
-int net_tcp_eof(void) { return tcp.peer_fin && tcp.rx_len == 0; }
+int net_tcp_state(void) { return tcp_cur ? tcp_cur->state : TCP_CLOSED; }
+int net_tcp_error(void) { return tcp_cur ? tcp_cur->error : 0; }
+int net_tcp_acked(void) { return !tcp_cur || (tcp_cur->tx_len == 0 && !tcp_cur->fin_queued); }
+int net_tcp_eof(void) { return tcp_cur && tcp_cur->peer_fin && tcp_cur->rx_len == 0; }
 
 int net_tcp_send(const uint8_t *data, uint32_t len)
 {
-    if (tcp.state != TCP_ESTABLISHED || tcp.tx_len > 0 || len > TCP_TX_CAP)
+    struct tcp_conn *c = tcp_cur;
+    if (!c || c->state != TCP_ESTABLISHED || c->tx_len > 0 || len > TCP_TX_CAP)
         return -1;
     for (uint32_t i = 0; i < len; i++)
-        tcp.tx[i] = data[i];
-    tcp.tx_seq = tcp.snd_nxt;
-    tcp.tx_len = len;
-    tcp_send_seg(TCP_F_PSH | TCP_F_ACK, data, len);
-    tcp.snd_nxt += len;
+        c->tx[i] = data[i];
+    c->tx_seq = c->snd_nxt;
+    c->tx_len = len;
+    tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, data, len);
+    c->snd_nxt += len;
     return 0;
 }
 
 int net_tcp_recv(uint8_t *out, uint32_t cap)
 {
-    uint32_t n = tcp.rx_len < cap ? tcp.rx_len : cap;
+    struct tcp_conn *c = tcp_cur;
+    if (!c)
+        return 0;
+    uint32_t n = c->rx_len < cap ? c->rx_len : cap;
     for (uint32_t i = 0; i < n; i++)
-        out[i] = tcp.rx[i];
-    for (uint32_t i = n; i < tcp.rx_len; i++)
-        tcp.rx[i - n] = tcp.rx[i];
-    tcp.rx_len -= n;
+        out[i] = c->rx[i];
+    for (uint32_t i = n; i < c->rx_len; i++)
+        c->rx[i - n] = c->rx[i];
+    c->rx_len -= n;
     return (int)n;
 }
 
 void net_tcp_close(void)
 {
-    if (tcp.state == TCP_ESTABLISHED || tcp.state == TCP_CLOSE_WAIT) {
-        tcp.fin_seq = tcp.snd_nxt;
-        tcp.fin_queued = 1;
-        tcp_send_seg(TCP_F_FIN | TCP_F_ACK, 0, 0);
-        tcp.snd_nxt++;
-        tcp.state = (tcp.state == TCP_CLOSE_WAIT) ? TCP_LAST_ACK : TCP_FIN_WAIT;
+    struct tcp_conn *c = tcp_cur;
+    if (!c)
+        return;
+    if (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT) {
+        c->fin_seq = c->snd_nxt;
+        c->fin_queued = 1;
+        tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
+        c->snd_nxt++;
+        c->state = (c->state == TCP_CLOSE_WAIT) ? TCP_LAST_ACK : TCP_FIN_WAIT;
     }
 }
 
@@ -934,25 +955,28 @@ void net_tcp_close(void)
  * Called from the blocking syscall's wait loop. */
 void net_tcp_retransmit(void)
 {
-    uint32_t now = (uint32_t)timer_ticks();
-    if (now - tcp.last_send < 100)
+    struct tcp_conn *c = tcp_cur;
+    if (!c)
         return;
-    if (tcp.state == TCP_SYN_SENT) {
-        tcp.snd_nxt--;
-        tcp_send_seg(TCP_F_SYN, 0, 0);
-        tcp.snd_nxt++;
-    } else if (tcp.tx_len > 0 && tcp.snd_una < tcp.tx_seq + tcp.tx_len) {
-        uint32_t off = tcp.snd_una - tcp.tx_seq;
-        uint32_t n = tcp.tx_len - off;
-        uint32_t save = tcp.snd_nxt;
-        tcp.snd_nxt = tcp.snd_una;
-        tcp_send_seg(TCP_F_PSH | TCP_F_ACK, tcp.tx + off, n);
-        tcp.snd_nxt = save;
-    } else if (tcp.fin_queued && tcp.snd_una <= tcp.fin_seq) {
-        uint32_t save = tcp.snd_nxt;
-        tcp.snd_nxt = tcp.fin_seq;
-        tcp_send_seg(TCP_F_FIN | TCP_F_ACK, 0, 0);
-        tcp.snd_nxt = save;
+    uint32_t now = (uint32_t)timer_ticks();
+    if (now - c->last_send < 100)
+        return;
+    if (c->state == TCP_SYN_SENT) {
+        c->snd_nxt--;
+        tcp_send_seg(c, TCP_F_SYN, 0, 0);
+        c->snd_nxt++;
+    } else if (c->tx_len > 0 && c->snd_una < c->tx_seq + c->tx_len) {
+        uint32_t off = c->snd_una - c->tx_seq;
+        uint32_t n = c->tx_len - off;
+        uint32_t save = c->snd_nxt;
+        c->snd_nxt = c->snd_una;
+        tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, c->tx + off, n);
+        c->snd_nxt = save;
+    } else if (c->fin_queued && c->snd_una <= c->fin_seq) {
+        uint32_t save = c->snd_nxt;
+        c->snd_nxt = c->fin_seq;
+        tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
+        c->snd_nxt = save;
     }
 }
 
@@ -979,7 +1003,21 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         stat_bad_cksum++;   /* Phase 11: drop silently, not even an RST */
         return;
     }
-    if (tcp.state == TCP_CLOSED) {
+    /* Demux by 4-tuple across the connection table. */
+    struct tcp_conn *c = 0;
+    int any_open = 0;
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        struct tcp_conn *sl = &tcp_conns[i];
+        if (sl->state == TCP_CLOSED)
+            continue;
+        any_open = 1;
+        if (ip_eq(src_ip, sl->peer_ip) && sport == sl->peer_port
+            && dport == sl->local_port)
+            c = sl;
+    }
+    if (!c) {
+        if (any_open)
+            return;   /* open table, wrong tuple: drop (pre-table behaviour) */
         if (flags & TCP_F_RST)
             return;
         /* RFC 793 reset for a segment with no connection. */
@@ -992,56 +1030,53 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
                          TCP_F_RST | TCP_F_ACK, 0, 0);
         return;
     }
-    if (!ip_eq(src_ip, tcp.peer_ip) || sport != tcp.peer_port
-        || dport != tcp.local_port)
-        return;
     if (flags & TCP_F_RST) {
-        tcp.error = 1;
-        tcp.state = TCP_CLOSED;
+        c->error = 1;
+        c->state = TCP_CLOSED;
         return;
     }
-    if (tcp.state == TCP_SYN_SENT) {
+    if (c->state == TCP_SYN_SENT) {
         if ((flags & (TCP_F_SYN | TCP_F_ACK)) == (TCP_F_SYN | TCP_F_ACK)
-            && ack == tcp.snd_nxt) {
-            tcp.snd_una = ack;
-            tcp.rcv_nxt = seq + 1;
-            tcp.state = TCP_ESTABLISHED;
-            tcp_send_seg(TCP_F_ACK, 0, 0);
+            && ack == c->snd_nxt) {
+            c->snd_una = ack;
+            c->rcv_nxt = seq + 1;
+            c->state = TCP_ESTABLISHED;
+            tcp_send_seg(c, TCP_F_ACK, 0, 0);
         }
         return;
     }
     /* ACK processing: advance snd_una over data and FIN. */
-    if ((flags & TCP_F_ACK) && ack > tcp.snd_una && ack <= tcp.snd_nxt) {
-        tcp.snd_una = ack;
-        if (tcp.tx_len > 0 && ack >= tcp.tx_seq + tcp.tx_len)
-            tcp.tx_len = 0;
-        if (tcp.fin_queued && ack > tcp.fin_seq) {
-            tcp.fin_queued = 0;
-            if (tcp.state == TCP_LAST_ACK)
-                tcp.state = TCP_CLOSED;
+    if ((flags & TCP_F_ACK) && ack > c->snd_una && ack <= c->snd_nxt) {
+        c->snd_una = ack;
+        if (c->tx_len > 0 && ack >= c->tx_seq + c->tx_len)
+            c->tx_len = 0;
+        if (c->fin_queued && ack > c->fin_seq) {
+            c->fin_queued = 0;
+            if (c->state == TCP_LAST_ACK)
+                c->state = TCP_CLOSED;
         }
     }
     /* In-order data. */
     if (dlen > 0) {
-        if (seq == tcp.rcv_nxt) {
-            uint32_t room = TCP_RX_CAP - tcp.rx_len;
+        if (seq == c->rcv_nxt) {
+            uint32_t room = TCP_RX_CAP - c->rx_len;
             uint32_t n = dlen < room ? dlen : room;
             for (uint32_t i = 0; i < n; i++)
-                tcp.rx[tcp.rx_len + i] = data[i];
-            tcp.rx_len += n;
-            tcp.rcv_nxt += n;
+                c->rx[c->rx_len + i] = data[i];
+            c->rx_len += n;
+            c->rcv_nxt += n;
         }
-        tcp_send_seg(TCP_F_ACK, 0, 0);   /* ack (or dup-ack) */
+        tcp_send_seg(c, TCP_F_ACK, 0, 0);   /* ack (or dup-ack) */
     }
     /* FIN, in order after any data in this segment. */
-    if ((flags & TCP_F_FIN) && seq + dlen == tcp.rcv_nxt) {
-        tcp.rcv_nxt++;
-        tcp.peer_fin = 1;
-        tcp_send_seg(TCP_F_ACK, 0, 0);
-        if (tcp.state == TCP_ESTABLISHED)
-            tcp.state = TCP_CLOSE_WAIT;
-        else if (tcp.state == TCP_FIN_WAIT)
-            tcp.state = TCP_CLOSED;
+    if ((flags & TCP_F_FIN) && seq + dlen == c->rcv_nxt) {
+        c->rcv_nxt++;
+        c->peer_fin = 1;
+        tcp_send_seg(c, TCP_F_ACK, 0, 0);
+        if (c->state == TCP_ESTABLISHED)
+            c->state = TCP_CLOSE_WAIT;
+        else if (c->state == TCP_FIN_WAIT)
+            c->state = TCP_CLOSED;
     }
 }
 
