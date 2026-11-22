@@ -542,12 +542,23 @@ static int64_t sys_tcpaccept(uint64_t out_va)
         net_tcp_server_tick();
         sched_block_current((uint64_t)timer_ticks() + 10);
     }
+    /* Timeout (Phase 12 inc.4, review-001): release the listener
+     * and any half-open slot instead of leaking them. */
+    net_tcp_server_reset();
+    net_tcp_unlisten();
     return -1;
 }
 
 static int64_t sys_tcpsrv_close(void)
 {
-    if (net_tcp_server_close() != 0) return -1;
+    /* No accepted connection (e.g. it was killed by an RST, or
+     * this is the accept-timeout cleanup): still release the
+     * listener and any server slot (Phase 12 inc.4, review-001). */
+    if (net_tcp_server_close() != 0) {
+        net_tcp_server_reset();
+        net_tcp_unlisten();
+        return -1;
+    }
     for (int i = 0; i < 50; i++) {
         if (net_tcp_server_state() == NET_TCP_CLOSED) break;
         net_tcp_server_tick();

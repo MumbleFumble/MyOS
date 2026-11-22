@@ -534,7 +534,7 @@ static void cmd_tcplisten(const char *arg)
     }
     if (sys_tcplisten(port) != 0) { puts_u("tcplisten: listen failed\r\n"); return; }
     struct tcpaccept_out o;
-    if (sys_tcpaccept(&o) != 0) { puts_u("tcplisten: accept timed out\r\n"); return; }
+    if (sys_tcpaccept(&o) != 0) { sys_tcpsrv_close(); puts_u("tcplisten: accept timed out\r\n"); return; }
     puts_u("tcplisten: accepted ");
     print_ip(o.ip);
     puts_u(":");
@@ -556,7 +556,7 @@ static void cmd_tcpechosrv(const char *arg)
     }
     if (sys_tcplisten(port) != 0) { puts_u("tcpechosrv: listen failed\r\n"); return; }
     struct tcpaccept_out o;
-    if (sys_tcpaccept(&o) != 0) { puts_u("tcpechosrv: accept timed out\r\n"); return; }
+    if (sys_tcpaccept(&o) != 0) { sys_tcpsrv_close(); puts_u("tcpechosrv: accept timed out\r\n"); return; }
     puts_u("tcpechosrv: accepted ");
     print_ip(o.ip);
     puts_u(":");

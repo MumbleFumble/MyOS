@@ -991,6 +991,21 @@ static void tcp_close_conn(struct tcp_conn *c)
     }
 }
 
+/* Free a connection slot (Phase 12 inc.4, review-001): every
+ * path that closes a slot goes through here so cleanup is not
+ * path-dependent. Clears the server flag and the data state;
+ * error is deliberately preserved (the client close paths read
+ * it after an RST). */
+static void tcp_slot_free(struct tcp_conn *c)
+{
+    c->state = TCP_CLOSED;
+    c->is_server = 0;
+    c->rx_len = 0;
+    c->tx_len = 0;
+    c->fin_queued = 0;
+    c->peer_fin = 0;
+}
+
 void net_tcp_close(void)
 {
     if (tcp_cur)
@@ -1059,7 +1074,7 @@ void net_tcp_unlisten(void)
 {
     for (int i = 0; i < TCP_MAX_CONN; i++)
         if (tcp_conns[i].state == TCP_LISTEN)
-            tcp_conns[i].state = TCP_CLOSED;
+            tcp_slot_free(&tcp_conns[i]);
 }
 
 /* The accepted server connection (handshake done or closing), or
@@ -1143,12 +1158,7 @@ void net_tcp_server_reset(void)
     for (int i = 0; i < TCP_MAX_CONN; i++) {
         struct tcp_conn *c = &tcp_conns[i];
         if (c->is_server && c->state != TCP_LISTEN) {
-            c->state = TCP_CLOSED;
-            c->is_server = 0;
-            c->rx_len = 0;
-            c->tx_len = 0;
-            c->fin_queued = 0;
-            c->peer_fin = 0;
+            tcp_slot_free(c);
             c->error = 0;
         }
     }
@@ -1266,11 +1276,11 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     }
     if (flags & TCP_F_RST) {
         if (c->state == TCP_SYN_RCVD) {
-            c->state = TCP_CLOSED;   /* half-open refused: free the slot */
+            tcp_slot_free(c);   /* half-open refused: free the slot */
             return;
         }
         c->error = 1;
-        c->state = TCP_CLOSED;
+        tcp_slot_free(c);
         return;
     }
     if (c->state == TCP_SYN_RCVD) {
@@ -1304,7 +1314,7 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         if (c->fin_queued && ack > c->fin_seq) {
             c->fin_queued = 0;
             if (c->state == TCP_LAST_ACK)
-                c->state = TCP_CLOSED;
+                tcp_slot_free(c);
         }
     }
     /* In-order data. */
@@ -1327,7 +1337,7 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         if (c->state == TCP_ESTABLISHED)
             c->state = TCP_CLOSE_WAIT;
         else if (c->state == TCP_FIN_WAIT)
-            c->state = TCP_CLOSED;
+            tcp_slot_free(c);
     }
 }
 
