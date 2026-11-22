@@ -558,6 +558,52 @@ static int64_t sys_tcpsrv_close(void)
     return 0;
 }
 
+/* SYS_TCPSRV_SEND / SYS_TCPSRV_RECV (Phase 12 inc.3): data on
+ * the accepted server connection. Send stages through a kernel
+ * buffer, waits for the one-segment tx slot, then for the ACK;
+ * recv blocks until data, EOF, or a ~60 s bound (0 = EOF or
+ * timeout, -1 = no connection). Both drive the server
+ * retransmit tick from their wait loops. */
+static int64_t sys_tcpsrv_send(uint64_t data_va, uint64_t len)
+{
+    if (!data_va || len == 0 || len > 1024) return -1;
+    static uint8_t skbuf[1024];
+    const uint8_t *d = (const uint8_t *)data_va;
+    for (uint64_t k = 0; k < len; k++) skbuf[k] = d[k];
+    for (int i = 0; i < 50; i++) {
+        if (net_tcp_server_send(skbuf, (uint32_t)len) == 0) goto sent;
+        if (net_tcp_server_state() == NET_TCP_CLOSED) return -1;
+        net_tcp_server_tick();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return -1;
+  sent:
+    for (int i = 0; i < 50; i++) {
+        if (net_tcp_server_acked()) {
+            if (net_tcp_server_state() == NET_TCP_CLOSED) return -1;
+            return (int64_t)len;
+        }
+        net_tcp_server_tick();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return -1;
+}
+
+static int64_t sys_tcpsrv_recv(uint64_t out_va, uint64_t cap)
+{
+    if (!out_va || cap == 0 || cap > 2048) return -1;
+    uint8_t *out = (uint8_t *)out_va;
+    for (int i = 0; i < 600; i++) {
+        int n = net_tcp_server_recv(out, (uint32_t)cap);
+        if (n > 0) return n;
+        if (net_tcp_server_eof()) return 0;
+        if (net_tcp_server_state() == NET_TCP_CLOSED) return 0;
+        net_tcp_server_tick();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return 0;
+}
+
 static int64_t sys_tcpecho(uint64_t ip_va, uint64_t port,
                            uint64_t args_va)
 {
@@ -768,6 +814,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TCPLISTEN: return sys_tcplisten(arg1);
     case SYS_TCPACCEPT: return sys_tcpaccept(arg1);
     case SYS_TCPSRV_CLOSE: return sys_tcpsrv_close();
+    case SYS_TCPSRV_SEND: return sys_tcpsrv_send(arg1, arg2);
+    case SYS_TCPSRV_RECV: return sys_tcpsrv_recv(arg1, arg2);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

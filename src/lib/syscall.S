@@ -256,6 +256,20 @@ sys_tcpsrv_close:
     int  0x80
     ret
 
+/* long sys_tcpsrv_send(const void *data, long len) */
+.global sys_tcpsrv_send
+sys_tcpsrv_send:
+    mov  rax, 39        /* SYS_TCPSRV_SEND */
+    int  0x80
+    ret
+
+/* long sys_tcpsrv_recv(void *out, long cap) */
+.global sys_tcpsrv_recv
+sys_tcpsrv_recv:
+    mov  rax, 40        /* SYS_TCPSRV_RECV */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

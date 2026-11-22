@@ -178,6 +178,8 @@ struct tcpaccept_out {
 long sys_tcplisten(long port);
 long sys_tcpaccept(struct tcpaccept_out *out);
 long sys_tcpsrv_close(void);
+long sys_tcpsrv_send(const void *data, long len);
+long sys_tcpsrv_recv(void *out, long cap);
 long sys_tcpecho(const unsigned char *ip, unsigned short port,
                  struct tcpecho_args *args);
 long sys_nslookup(const char *name, const unsigned char *server,

@@ -909,20 +909,66 @@ int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
 
 int net_tcp_state(void) { return tcp_cur ? tcp_cur->state : TCP_CLOSED; }
 int net_tcp_error(void) { return tcp_cur ? tcp_cur->error : 0; }
-int net_tcp_acked(void) { return !tcp_cur || (tcp_cur->tx_len == 0 && !tcp_cur->fin_queued); }
-int net_tcp_eof(void) { return tcp_cur && tcp_cur->peer_fin && tcp_cur->rx_len == 0; }
 
-int net_tcp_send(const uint8_t *data, uint32_t len)
+/* Per-connection data surface (Phase 12 inc.3, generalised from
+ * the client-only versions; the factoring, the can_send gate and
+ * the no-slot server semantics follow a design draft from Claude,
+ * adapted to this file). Client wrappers below keep their exact
+ * pre-inc.3 checks and NULL behaviour. */
+static int tcp_conn_acked(const struct tcp_conn *c)
 {
-    struct tcp_conn *c = tcp_cur;
-    if (!c || c->state != TCP_ESTABLISHED || c->tx_len > 0 || len > TCP_TX_CAP)
-        return -1;
+    return c->tx_len == 0 && !c->fin_queued;
+}
+
+static int tcp_conn_eof(const struct tcp_conn *c)
+{
+    return c->peer_fin && c->rx_len == 0;
+}
+
+int net_tcp_acked(void) { return !tcp_cur || tcp_conn_acked(tcp_cur); }
+int net_tcp_eof(void) { return tcp_cur && tcp_conn_eof(tcp_cur); }
+
+/* Server-side send gate: ESTABLISHED, or CLOSE_WAIT (the peer's
+ * FIN is in but our direction is still open, so data that arrived
+ * with the FIN can still be answered). Never once our FIN is
+ * queued: new data would sit at or after fin_seq. */
+static int tcp_conn_can_send(const struct tcp_conn *c)
+{
+    if (c->fin_queued)
+        return 0;
+    return c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT;
+}
+
+/* Copy into the connection's single tx slot and transmit. The
+ * caller has done all checks. */
+static void tcp_conn_queue_tx(struct tcp_conn *c, const uint8_t *data,
+                              uint32_t len)
+{
     for (uint32_t i = 0; i < len; i++)
         c->tx[i] = data[i];
     c->tx_seq = c->snd_nxt;
     c->tx_len = len;
     tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, data, len);
     c->snd_nxt += len;
+}
+
+static int tcp_conn_recv(struct tcp_conn *c, uint8_t *out, uint32_t cap)
+{
+    uint32_t n = c->rx_len < cap ? c->rx_len : cap;
+    for (uint32_t i = 0; i < n; i++)
+        out[i] = c->rx[i];
+    for (uint32_t i = n; i < c->rx_len; i++)
+        c->rx[i - n] = c->rx[i];
+    c->rx_len -= n;
+    return (int)n;
+}
+
+int net_tcp_send(const uint8_t *data, uint32_t len)
+{
+    struct tcp_conn *c = tcp_cur;
+    if (!c || c->state != TCP_ESTABLISHED || c->tx_len > 0 || len > TCP_TX_CAP)
+        return -1;
+    tcp_conn_queue_tx(c, data, len);
     return 0;
 }
 
@@ -931,13 +977,7 @@ int net_tcp_recv(uint8_t *out, uint32_t cap)
     struct tcp_conn *c = tcp_cur;
     if (!c)
         return 0;
-    uint32_t n = c->rx_len < cap ? c->rx_len : cap;
-    for (uint32_t i = 0; i < n; i++)
-        out[i] = c->rx[i];
-    for (uint32_t i = n; i < c->rx_len; i++)
-        c->rx[i - n] = c->rx[i];
-    c->rx_len -= n;
-    return (int)n;
+    return tcp_conn_recv(c, out, cap);
 }
 
 static void tcp_close_conn(struct tcp_conn *c)
@@ -959,9 +999,8 @@ void net_tcp_close(void)
 
 /* Retransmit whatever is unacked if it has been out for ~1 s.
  * Called from the blocking syscall's wait loop. */
-void net_tcp_retransmit(void)
+static void tcp_conn_retransmit(struct tcp_conn *c)
 {
-    struct tcp_conn *c = tcp_cur;
     if (!c)
         return;
     uint32_t now = (uint32_t)timer_ticks();
@@ -984,6 +1023,11 @@ void net_tcp_retransmit(void)
         tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
         c->snd_nxt = save;
     }
+}
+
+void net_tcp_retransmit(void)
+{
+    tcp_conn_retransmit(tcp_cur);
 }
 
 /* ---- TCP server side (Phase 12 inc.2): listen + accept ----
@@ -1042,6 +1086,43 @@ int net_tcp_accepted(uint8_t ip[4], uint16_t *port)
     return 1;
 }
 
+/* Server data surface (Phase 12 inc.3): the same per-connection
+ * helpers on the accepted slot. With no accepted slot, acked and
+ * eof report 1 so send/recv/close wait loops terminate instead
+ * of spinning on a torn-down connection. */
+int net_tcp_server_send(const uint8_t *data, uint32_t len)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    if (!c || !tcp_conn_can_send(c) || c->tx_len > 0 || len > TCP_TX_CAP)
+        return -1;
+    tcp_conn_queue_tx(c, data, len);
+    return 0;
+}
+
+int net_tcp_server_recv(uint8_t *out, uint32_t cap)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    if (!c)
+        return 0;
+    return tcp_conn_recv(c, out, cap);
+}
+
+int net_tcp_server_acked(void)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    if (!c)
+        return 1;
+    return tcp_conn_acked(c);
+}
+
+int net_tcp_server_eof(void)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    if (!c)
+        return 1;
+    return tcp_conn_eof(c);
+}
+
 int net_tcp_server_state(void)
 {
     struct tcp_conn *c = tcp_accepted_conn();
@@ -1083,18 +1164,18 @@ void net_tcp_server_tick(void)
         struct tcp_conn *c = &tcp_conns[i];
         if (!c->is_server || c == tcp_cur)
             continue;
-        if (now - c->last_send < 100)
-            continue;
         if (c->state == TCP_SYN_RCVD) {
+            if (now - c->last_send < 100)
+                continue;
             uint32_t save = c->snd_nxt;
             c->snd_nxt = c->snd_una;
             tcp_send_seg(c, TCP_F_SYN | TCP_F_ACK, 0, 0);
             c->snd_nxt = save;
-        } else if (c->fin_queued && c->snd_una <= c->fin_seq) {
-            uint32_t save = c->snd_nxt;
-            c->snd_nxt = c->fin_seq;
-            tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
-            c->snd_nxt = save;
+        } else {
+            /* Full data-then-FIN retransmit for the accepted
+             * connection (Phase 12 inc.3); a no-op for LISTEN
+             * and CLOSED slots. */
+            tcp_conn_retransmit(c);
         }
     }
 }

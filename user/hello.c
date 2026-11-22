@@ -544,6 +544,34 @@ static void cmd_tcplisten(const char *arg)
     puts_u("tcplisten: closed\r\n");
 }
 
+static void cmd_tcpechosrv(const char *arg)
+{
+    char buf[16];
+    int port = 0;
+    int i = 0;
+    while (arg[i] >= '0' && arg[i] <= '9') { port = port * 10 + (arg[i] - '0'); i++; }
+    if (i == 0 || port == 0 || port > 65535) {
+        puts_u("usage: tcpechosrv <port>\r\n");
+        return;
+    }
+    if (sys_tcplisten(port) != 0) { puts_u("tcpechosrv: listen failed\r\n"); return; }
+    struct tcpaccept_out o;
+    if (sys_tcpaccept(&o) != 0) { puts_u("tcpechosrv: accept timed out\r\n"); return; }
+    puts_u("tcpechosrv: accepted ");
+    print_ip(o.ip);
+    puts_u(":");
+    puts_u(itoa((long)o.port, buf));
+    puts_u("\r\n");
+    static unsigned char ebuf[512];
+    for (;;) {
+        long n = sys_tcpsrv_recv(ebuf, 512);
+        if (n <= 0) break;
+        if (sys_tcpsrv_send(ebuf, n) < 0) break;
+    }
+    sys_tcpsrv_close();
+    puts_u("tcpechosrv: closed\r\n");
+}
+
 static void cmd_tcpecho(const char *arg)
 {
     char ipbuf[24];
@@ -730,6 +758,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "nslookup")) { cmd_nslookup(arg); puts_u("> "); continue; }
         if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
         if (streq(cmd, "tcplisten")) { cmd_tcplisten(arg); puts_u("> "); continue; }
+        if (streq(cmd, "tcpechosrv")) { cmd_tcpechosrv(arg); puts_u("> "); continue; }
         if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
         if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
         if (streq(cmd, "rm")) { cmd_rm(arg); puts_u("> "); continue; }

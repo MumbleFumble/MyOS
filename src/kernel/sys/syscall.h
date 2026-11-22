@@ -40,7 +40,9 @@
 #define SYS_FRENAME 35     /* frename(old, new) -> 0 or -1 (Phase 11) */
 #define SYS_TCPLISTEN 36   /* tcplisten(port) -> 0 or -1 (Phase 12) */
 #define SYS_TCPACCEPT 37   /* tcpaccept(out) -> 0 or -1 (Phase 12) */
-#define SYS_TCPSRV_CLOSE 38 /* tcpserve_close() -> 0 or -1 (Phase 12) */        /* ping(ip_ptr, seq) -> rtt ticks or -1 (Phase 7) */     /* netsend() -> 0 or -1 (Phase 7 test frame) */     /* fcreate(path) -> fd (create/truncate) */  /* bcache_sync() -> 0 or -1 */
+#define SYS_TCPSRV_CLOSE 38 /* tcpserve_close() -> 0 or -1 (Phase 12) */
+#define SYS_TCPSRV_SEND 39 /* tcpsrv_send(data, len) -> len or -1 (Phase 12) */
+#define SYS_TCPSRV_RECV 40 /* tcpsrv_recv(out, cap) -> n, 0=EOF, -1 (Phase 12) */        /* ping(ip_ptr, seq) -> rtt ticks or -1 (Phase 7) */     /* netsend() -> 0 or -1 (Phase 7 test frame) */     /* fcreate(path) -> fd (create/truncate) */  /* bcache_sync() -> 0 or -1 */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */
