@@ -572,6 +572,79 @@ static void cmd_tcpechosrv(const char *arg)
     puts_u("tcpechosrv: closed\r\n");
 }
 
+/* httpd <port> <file> (Phase 12 inc.5): serve one connection.
+ * Reads the request line (up to the first CRLF, bounded), then
+ * replies HTTP/1.0 200 with the named MyFS file as the body,
+ * or 404 with a short body when the file does not exist. Files
+ * are served up to an 8192-byte cap. */
+static int httpd_send(const unsigned char *p, long n)
+{
+    while (n > 0) {
+        long chunk = n > 512 ? 512 : n;
+        if (sys_tcpsrv_send(p, chunk) < 0) return -1;
+        p += chunk; n -= chunk;
+    }
+    return 0;
+}
+
+static void cmd_httpd(const char *arg)
+{
+    char buf[16];
+    int port = 0;
+    int i = 0;
+    while (arg[i] >= '0' && arg[i] <= '9') { port = port * 10 + (arg[i] - '0'); i++; }
+    while (arg[i] == ' ') i++;
+    const char *fname = arg + i;
+    if (port == 0 || port > 65535 || !fname[0]) {
+        puts_u("usage: httpd <port> <file>\r\n");
+        return;
+    }
+    if (sys_tcplisten(port) != 0) { puts_u("httpd: listen failed\r\n"); return; }
+    struct tcpaccept_out o;
+    if (sys_tcpaccept(&o) != 0) { sys_tcpsrv_close(); puts_u("httpd: accept timed out\r\n"); return; }
+    puts_u("httpd: accepted ");
+    print_ip(o.ip);
+    puts_u(":");
+    puts_u(itoa((long)o.port, buf));
+    puts_u("\r\n");
+    static unsigned char rbuf[512];
+    long rlen = 0;
+    while (rlen < 512) {
+        long n = sys_tcpsrv_recv(rbuf + rlen, 512 - rlen);
+        if (n <= 0) break;
+        rlen += n;
+        if (rlen >= 2 && rbuf[rlen - 2] == '\r' && rbuf[rlen - 1] == '\n') break;
+        if (rlen >= 1 && rbuf[rlen - 1] == '\n') break;
+    }
+    if (rlen > 0) {
+        static unsigned char fbuf[8192];
+        static char hdr[96];
+        long fd = sys_open(fname);
+        if (fd < 0) {
+            const char *h = "HTTP/1.0 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found";
+            httpd_send((const unsigned char *)h, slen_u(h));
+        } else {
+            long flen = 0;
+            long r;
+            while (flen < 8192 && (r = sys_read(fd, fbuf + flen, 8192 - flen)) > 0)
+                flen += r;
+            sys_close(fd);
+            int hp = 0;
+            const char *pre = "HTTP/1.0 200 OK\r\nContent-Length: ";
+            while (pre[hp]) { hdr[hp] = pre[hp]; hp++; }
+            const char *num = itoa(flen, buf);
+            int k = 0;
+            while (num[k]) hdr[hp++] = num[k++];
+            hdr[hp++] = '\r'; hdr[hp++] = '\n'; hdr[hp++] = '\r'; hdr[hp++] = '\n';
+            hdr[hp] = 0;
+            if (httpd_send((const unsigned char *)hdr, hp) == 0)
+                httpd_send(fbuf, flen);
+        }
+    }
+    sys_tcpsrv_close();
+    puts_u("httpd: closed\r\n");
+}
+
 static void cmd_tcpecho(const char *arg)
 {
     char ipbuf[24];
@@ -759,6 +832,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
         if (streq(cmd, "tcplisten")) { cmd_tcplisten(arg); puts_u("> "); continue; }
         if (streq(cmd, "tcpechosrv")) { cmd_tcpechosrv(arg); puts_u("> "); continue; }
+        if (streq(cmd, "httpd")) { cmd_httpd(arg); puts_u("> "); continue; }
         if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
         if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
         if (streq(cmd, "rm")) { cmd_rm(arg); puts_u("> "); continue; }
