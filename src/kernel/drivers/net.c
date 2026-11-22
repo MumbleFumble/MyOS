@@ -787,7 +787,7 @@ void net_input(const uint8_t *f, uint16_t len)
 #define TCP_F_PSH 0x08
 #define TCP_F_ACK 0x10
 enum { TCP_CLOSED = 0, TCP_SYN_SENT, TCP_ESTABLISHED, TCP_FIN_WAIT,
-       TCP_CLOSE_WAIT, TCP_LAST_ACK };
+       TCP_CLOSE_WAIT, TCP_LAST_ACK, TCP_LISTEN, TCP_SYN_RCVD };
 #define TCP_MAX_CONN 4
 struct tcp_conn {
     int state;
@@ -801,6 +801,7 @@ struct tcp_conn {
     uint32_t tx_seq, tx_len;   /* unacked data: seq + length */
     uint32_t fin_seq;
     int fin_queued, peer_fin, error;
+    int is_server;   /* slot belongs to the passive (listen) side */
     uint32_t last_send;
 };
 static struct tcp_conn tcp_conns[TCP_MAX_CONN];
@@ -877,6 +878,7 @@ void net_tcp_reset(void)
     c->fin_queued = 0;
     c->peer_fin = 0;
     c->error = 0;
+    c->is_server = 0;
 }
 
 int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
@@ -898,6 +900,7 @@ int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
     c->fin_queued = 0;
     c->peer_fin = 0;
     c->error = 0;
+    c->is_server = 0;
     c->state = TCP_SYN_SENT;
     tcp_send_seg(c, TCP_F_SYN, 0, 0);
     c->snd_nxt++;   /* SYN consumes a sequence number */
@@ -937,11 +940,8 @@ int net_tcp_recv(uint8_t *out, uint32_t cap)
     return (int)n;
 }
 
-void net_tcp_close(void)
+static void tcp_close_conn(struct tcp_conn *c)
 {
-    struct tcp_conn *c = tcp_cur;
-    if (!c)
-        return;
     if (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT) {
         c->fin_seq = c->snd_nxt;
         c->fin_queued = 1;
@@ -949,6 +949,12 @@ void net_tcp_close(void)
         c->snd_nxt++;
         c->state = (c->state == TCP_CLOSE_WAIT) ? TCP_LAST_ACK : TCP_FIN_WAIT;
     }
+}
+
+void net_tcp_close(void)
+{
+    if (tcp_cur)
+        tcp_close_conn(tcp_cur);
 }
 
 /* Retransmit whatever is unacked if it has been out for ~1 s.
@@ -980,6 +986,119 @@ void net_tcp_retransmit(void)
     }
 }
 
+/* ---- TCP server side (Phase 12 inc.2): listen + accept ----
+ * One listening port at a time (a LISTEN slot). A bare SYN to
+ * that port claims a free slot in tcp_input and completes the
+ * handshake there; the functions below are the syscall-facing
+ * surface. No data transfer on accepted connections yet. */
+int net_tcp_listen(uint16_t port)
+{
+    struct tcp_conn *free_slot = 0;
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        if (tcp_conns[i].state == TCP_LISTEN) {
+            tcp_conns[i].local_port = port;   /* one listener: move it */
+            return 0;
+        }
+        if (!free_slot && tcp_conns[i].state == TCP_CLOSED)
+            free_slot = &tcp_conns[i];
+    }
+    if (!free_slot)
+        return -1;
+    free_slot->state = TCP_LISTEN;
+    free_slot->local_port = port;
+    free_slot->is_server = 1;
+    free_slot->error = 0;
+    return 0;
+}
+
+void net_tcp_unlisten(void)
+{
+    for (int i = 0; i < TCP_MAX_CONN; i++)
+        if (tcp_conns[i].state == TCP_LISTEN)
+            tcp_conns[i].state = TCP_CLOSED;
+}
+
+/* The accepted server connection (handshake done or closing), or
+ * NULL. The client connection (tcp_cur) is never reported here. */
+static struct tcp_conn *tcp_accepted_conn(void)
+{
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        struct tcp_conn *c = &tcp_conns[i];
+        if (c->is_server && c != tcp_cur
+            && (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT
+                || c->state == TCP_FIN_WAIT || c->state == TCP_LAST_ACK))
+            return c;
+    }
+    return 0;
+}
+
+int net_tcp_accepted(uint8_t ip[4], uint16_t *port)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    if (!c || (c->state != TCP_ESTABLISHED && c->state != TCP_CLOSE_WAIT))
+        return 0;
+    ip_copy(ip, c->peer_ip);
+    *port = c->peer_port;
+    return 1;
+}
+
+int net_tcp_server_state(void)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    return c ? c->state : TCP_CLOSED;
+}
+
+int net_tcp_server_close(void)
+{
+    struct tcp_conn *c = tcp_accepted_conn();
+    if (!c)
+        return -1;
+    tcp_close_conn(c);
+    return 0;
+}
+
+void net_tcp_server_reset(void)
+{
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        struct tcp_conn *c = &tcp_conns[i];
+        if (c->is_server && c->state != TCP_LISTEN) {
+            c->state = TCP_CLOSED;
+            c->is_server = 0;
+            c->rx_len = 0;
+            c->tx_len = 0;
+            c->fin_queued = 0;
+            c->peer_fin = 0;
+            c->error = 0;
+        }
+    }
+}
+
+/* Retransmit drivers for server slots (SYN-ACK and FIN), called
+ * from the blocking accept/close syscalls like the client's are
+ * from SYS_TCPECHO's wait loops. */
+void net_tcp_server_tick(void)
+{
+    uint32_t now = (uint32_t)timer_ticks();
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        struct tcp_conn *c = &tcp_conns[i];
+        if (!c->is_server || c == tcp_cur)
+            continue;
+        if (now - c->last_send < 100)
+            continue;
+        if (c->state == TCP_SYN_RCVD) {
+            uint32_t save = c->snd_nxt;
+            c->snd_nxt = c->snd_una;
+            tcp_send_seg(c, TCP_F_SYN | TCP_F_ACK, 0, 0);
+            c->snd_nxt = save;
+        } else if (c->fin_queued && c->snd_una <= c->fin_seq) {
+            uint32_t save = c->snd_nxt;
+            c->snd_nxt = c->fin_seq;
+            tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
+            c->snd_nxt = save;
+        }
+    }
+}
+
 static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
 {
     (void)len;   /* frame length; the IP total length is authoritative */
@@ -1008,7 +1127,7 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     int any_open = 0;
     for (int i = 0; i < TCP_MAX_CONN; i++) {
         struct tcp_conn *sl = &tcp_conns[i];
-        if (sl->state == TCP_CLOSED)
+        if (sl->state == TCP_CLOSED || sl->state == TCP_LISTEN)
             continue;
         any_open = 1;
         if (ip_eq(src_ip, sl->peer_ip) && sport == sl->peer_port
@@ -1016,6 +1135,40 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
             c = sl;
     }
     if (!c) {
+        /* Passive open (Phase 12 inc.2): a bare SYN to the listening
+         * port claims a free slot and is answered with a SYN-ACK.
+         * Table full: drop the SYN; the peer may retry. */
+        if ((flags & TCP_F_SYN) && !(flags & TCP_F_ACK)) {
+            struct tcp_conn *lst = 0, *ns = 0;
+            for (int i = 0; i < TCP_MAX_CONN; i++) {
+                if (tcp_conns[i].state == TCP_LISTEN
+                    && tcp_conns[i].local_port == dport)
+                    lst = &tcp_conns[i];
+                if (!ns && tcp_conns[i].state == TCP_CLOSED)
+                    ns = &tcp_conns[i];
+            }
+            if (lst) {
+                if (ns) {
+                    ip_copy(ns->peer_ip, src_ip);
+                    mac_copy(ns->peer_mac, f + 6);
+                    ns->peer_port = sport;
+                    ns->local_port = dport;
+                    ns->snd_una = ns->snd_nxt =
+                        (uint32_t)timer_ticks() ^ 0x5EED0000u;
+                    ns->rcv_nxt = seq + 1;
+                    ns->rx_len = 0;
+                    ns->tx_len = 0;
+                    ns->fin_queued = 0;
+                    ns->peer_fin = 0;
+                    ns->error = 0;
+                    ns->is_server = 1;
+                    ns->state = TCP_SYN_RCVD;
+                    tcp_send_seg(ns, TCP_F_SYN | TCP_F_ACK, 0, 0);
+                    ns->snd_nxt++;   /* SYN consumes a sequence number */
+                }
+                return;
+            }
+        }
         if (any_open)
             return;   /* open table, wrong tuple: drop (pre-table behaviour) */
         if (flags & TCP_F_RST)
@@ -1031,8 +1184,25 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         return;
     }
     if (flags & TCP_F_RST) {
+        if (c->state == TCP_SYN_RCVD) {
+            c->state = TCP_CLOSED;   /* half-open refused: free the slot */
+            return;
+        }
         c->error = 1;
         c->state = TCP_CLOSED;
+        return;
+    }
+    if (c->state == TCP_SYN_RCVD) {
+        if ((flags & TCP_F_SYN) && seq == c->rcv_nxt - 1) {
+            /* Retransmitted SYN: resend the SYN-ACK. */
+            uint32_t save = c->snd_nxt;
+            c->snd_nxt = c->snd_una;
+            tcp_send_seg(c, TCP_F_SYN | TCP_F_ACK, 0, 0);
+            c->snd_nxt = save;
+        } else if ((flags & TCP_F_ACK) && ack == c->snd_nxt) {
+            c->snd_una = ack;
+            c->state = TCP_ESTABLISHED;
+        }
         return;
     }
     if (c->state == TCP_SYN_SENT) {

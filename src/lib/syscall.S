@@ -235,6 +235,27 @@ sys_frename:
     int  0x80
     ret
 
+/* long sys_tcplisten(long port) */
+.global sys_tcplisten
+sys_tcplisten:
+    mov  rax, 36        /* SYS_TCPLISTEN */
+    int  0x80
+    ret
+
+/* long sys_tcpaccept(struct tcpaccept_out *out) */
+.global sys_tcpaccept
+sys_tcpaccept:
+    mov  rax, 37        /* SYS_TCPACCEPT */
+    int  0x80
+    ret
+
+/* long sys_tcpsrv_close(void) */
+.global sys_tcpsrv_close
+sys_tcpsrv_close:
+    mov  rax, 38        /* SYS_TCPSRV_CLOSE */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

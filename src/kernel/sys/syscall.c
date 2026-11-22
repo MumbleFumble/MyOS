@@ -515,6 +515,49 @@ struct tcpecho_args {
     char *out;
 };
 
+struct tcpaccept_out {
+    uint8_t ip[4];
+    uint16_t port;
+    uint16_t _pad;
+};
+
+/* SYS_TCPLISTEN (Phase 12): start listening on a port (one
+ * listener at a time). SYS_TCPACCEPT blocks in 100 ms slices
+ * (up to ~30 s) until a handshake completes, driving SYN-ACK
+ * retransmits from the wait loop. SYS_TCPSRV_CLOSE FINs the
+ * accepted connection, waits (bounded) for the close to finish,
+ * then frees the accepted slot and removes the listener. */
+static int64_t sys_tcplisten(uint64_t port)
+{
+    if (port == 0 || port > 65535) return -1;
+    return net_tcp_listen((uint16_t)port);
+}
+
+static int64_t sys_tcpaccept(uint64_t out_va)
+{
+    if (!out_va) return -1;
+    struct tcpaccept_out *o = (struct tcpaccept_out *)out_va;
+    for (int i = 0; i < 300; i++) {
+        if (net_tcp_accepted(o->ip, &o->port)) return 0;
+        net_tcp_server_tick();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    return -1;
+}
+
+static int64_t sys_tcpsrv_close(void)
+{
+    if (net_tcp_server_close() != 0) return -1;
+    for (int i = 0; i < 50; i++) {
+        if (net_tcp_server_state() == NET_TCP_CLOSED) break;
+        net_tcp_server_tick();
+        sched_block_current((uint64_t)timer_ticks() + 10);
+    }
+    net_tcp_server_reset();
+    net_tcp_unlisten();
+    return 0;
+}
+
 static int64_t sys_tcpecho(uint64_t ip_va, uint64_t port,
                            uint64_t args_va)
 {
@@ -722,6 +765,9 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_DHCP: return sys_dhcp(arg1);
     case SYS_NSLOOKUP: return sys_nslookup(arg1, arg2, arg3);
     case SYS_TCPECHO: return sys_tcpecho(arg1, arg2, arg3);
+    case SYS_TCPLISTEN: return sys_tcplisten(arg1);
+    case SYS_TCPACCEPT: return sys_tcpaccept(arg1);
+    case SYS_TCPSRV_CLOSE: return sys_tcpsrv_close();
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

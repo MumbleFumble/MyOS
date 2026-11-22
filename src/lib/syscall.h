@@ -170,6 +170,14 @@ struct pfweights_out {
 long sys_pfweights(unsigned int mode, struct pfweights_out *out);
 long sys_funlink(const char *path);
 long sys_frename(const char *old_path, const char *new_path);
+struct tcpaccept_out {
+    unsigned char ip[4];
+    unsigned short port;
+    unsigned short _pad;
+};
+long sys_tcplisten(long port);
+long sys_tcpaccept(struct tcpaccept_out *out);
+long sys_tcpsrv_close(void);
 long sys_tcpecho(const unsigned char *ip, unsigned short port,
                  struct tcpecho_args *args);
 long sys_nslookup(const char *name, const unsigned char *server,
