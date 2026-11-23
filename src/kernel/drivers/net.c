@@ -868,6 +868,77 @@ static void tcp_send_seg(struct tcp_conn *c, uint8_t flags,
     c->last_send = (uint32_t)timer_ticks();
 }
 
+/* Unpredictable ISNs (Phase 13 inc.4, review-009; RFC 6528
+ * shape, design reviewed with Claude): ISN = clock + F(4-tuple,
+ * secret), where the clock is the raw TSC and F is SipHash-2-4
+ * keyed by a boot secret harvested from TSC/PIT tick-edge
+ * jitter. A blind attacker who knows uptime and one connection's
+ * ISN learns nothing about any other connection's. The previous
+ * formula (a tick counter XOR a fixed constant) was computable
+ * from uptime alone. Seeded lazily on first use (task context;
+ * the PIT is long running by then). */
+static uint64_t isn_k0, isn_k1;
+static int isn_ready;
+
+#define ROTL64(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
+#define SIPROUND do { \
+        v0 += v1; v1 = ROTL64(v1, 13); v1 ^= v0; v0 = ROTL64(v0, 32); \
+        v2 += v3; v3 = ROTL64(v3, 16); v3 ^= v2; \
+        v0 += v3; v3 = ROTL64(v3, 21); v3 ^= v0; \
+        v2 += v1; v1 = ROTL64(v1, 17); v1 ^= v2; v2 = ROTL64(v2, 32); \
+    } while (0)
+
+/* SipHash-2-4 over two 64-bit words (fixed 16-byte input). */
+static uint64_t siphash_2w(uint64_t m0, uint64_t m1)
+{
+    uint64_t v0 = isn_k0 ^ 0x736f6d6570736575ull;
+    uint64_t v1 = isn_k1 ^ 0x646f72616e646f6dull;
+    uint64_t v2 = isn_k0 ^ 0x6c7967656e657261ull;
+    uint64_t v3 = isn_k1 ^ 0x7465646279746573ull;
+    uint64_t b  = 16ull << 56;
+
+    v3 ^= m0; SIPROUND; SIPROUND; v0 ^= m0;
+    v3 ^= m1; SIPROUND; SIPROUND; v0 ^= m1;
+    v3 ^= b;  SIPROUND; SIPROUND; v0 ^= b;
+    v2 ^= 0xff; SIPROUND; SIPROUND; SIPROUND; SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+static void tcp_isn_seed(void)
+{
+    uint64_t a = timer_tsc(), b = 0;
+    for (int i = 0; i < 16; i++) {
+        uint32_t t = timer_ticks();
+        while (timer_ticks() == t)
+            ;
+        uint64_t s = timer_tsc();
+        a = ROTL64(a, 7) ^ s;
+        b = (b + s) * 0x9E3779B97F4A7C15ull;
+    }
+    isn_k0 = a; isn_k1 = b;
+    isn_k0 = siphash_2w(a, b);           /* whiten the key */
+    isn_k1 = siphash_2w(b, a);
+    isn_ready = 1;
+}
+
+static uint32_t ip4_word(const uint8_t ip[4])
+{
+    return ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16)
+         | ((uint32_t)ip[2] << 8) | (uint32_t)ip[3];
+}
+
+static uint32_t tcp_isn(const uint8_t rip[4], uint16_t lport,
+                        uint16_t rport)
+{
+    if (!isn_ready) tcp_isn_seed();
+    uint64_t f = siphash_2w(
+        ((uint64_t)ip4_word(our_ip) << 32) | ip4_word(rip),
+        ((uint64_t)lport << 16) | rport);
+    /* Clock term (~microsecond TSC steps) keeps ISNs for the
+     * same 4-tuple increasing across incarnations. */
+    return (uint32_t)(timer_tsc() >> 12) + (uint32_t)f;
+}
+
 void net_tcp_reset(void)
 {
     struct tcp_conn *c = tcp_cur ? tcp_cur : &tcp_conns[0];
@@ -893,7 +964,8 @@ int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
     mac_copy(c->peer_mac, mac);
     c->peer_port = port;
     c->local_port = (uint16_t)(49152 + (timer_ticks() & 0x3FF));
-    c->snd_una = c->snd_nxt = (uint32_t)timer_ticks() ^ 0x5EED0000u;
+    c->snd_una = c->snd_nxt = tcp_isn(c->peer_ip, c->local_port,
+                                      c->peer_port);
     c->rcv_nxt = 0;
     c->rx_len = 0;
     c->tx_len = 0;
@@ -1245,7 +1317,8 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
                     ns->peer_port = sport;
                     ns->local_port = dport;
                     ns->snd_una = ns->snd_nxt =
-                        (uint32_t)timer_ticks() ^ 0x5EED0000u;
+                        tcp_isn(ns->peer_ip, ns->local_port,
+                                ns->peer_port);
                     ns->rcv_nxt = seq + 1;
                     ns->rx_len = 0;
                     ns->tx_len = 0;
@@ -1275,10 +1348,34 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         return;
     }
     if (flags & TCP_F_RST) {
+        /* Phase 13 inc.4 (review-009): a reset must prove it
+         * belongs to this connection before it may free the
+         * slot; anything else is dropped silently (no free, no
+         * error, no reply). Demux above never returns a LISTEN
+         * or CLOSED slot, so c is always a live connection. */
         if (c->state == TCP_SYN_RCVD) {
+            /* Acceptable only as the answer to our SYN-ACK:
+             * seq must be the next byte expected from the peer. */
+            if (seq != c->rcv_nxt)
+                return;
             tcp_slot_free(c);   /* half-open refused: free the slot */
             return;
         }
+        if (c->state == TCP_SYN_SENT) {
+            /* rcv_nxt is not yet meaningful; per RFC 9293 the
+             * reset counts only if it acknowledges our SYN. */
+            if (!(flags & TCP_F_ACK) || ack != c->snd_nxt)
+                return;
+            c->error = 1;
+            tcp_slot_free(c);
+            return;
+        }
+        /* Synchronised states: seq must lie in the receive
+         * window [rcv_nxt, rcv_nxt + TCP_RX_CAP) — the window
+         * every segment advertises. The modular subtraction
+         * handles sequence wraparound. */
+        if ((uint32_t)(seq - c->rcv_nxt) >= TCP_RX_CAP)
+            return;
         c->error = 1;
         tcp_slot_free(c);
         return;
