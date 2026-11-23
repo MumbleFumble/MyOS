@@ -390,6 +390,28 @@ int diskfs_delete(const char *name)
     if (!disk_mounted) return -1;
     int idx = diskfs_find(name);
     if (idx < 0 || disk_table[idx].deleted) return -1;
+
+    /* Phase 13 inc.2: tail-record free path. When the live record
+     * is the last one in the log, roll the log back instead of
+     * tombstoning: disk_append_lba returns to the record's start
+     * and disk_record_count decrements, the superblock is
+     * rewritten, and the next append reuses the freed sectors.
+     * The mount walk consumes exactly file_count records, so the
+     * rolled-back record simply leaves the log; the entry's
+     * earlier records (e.g. the tombstoned create record) still
+     * mark the name deleted on a remount. Non-tail deletes keep
+     * the tombstone path below, unchanged. */
+    uint32_t start = disk_table[idx].data_lba;
+    uint32_t sects = (uint32_t)((80 + disk_table[idx].size + 511) / 512);
+    if (disk_record_count > 0 && start + sects == disk_append_lba) {
+        disk_append_lba   = start;
+        disk_record_count--;
+        if (diskfs_write_super() != 0) return -1;
+        disk_table[idx].deleted = 1;
+        if (bcache_sync() != 0) return -1;
+        return 0;
+    }
+
     if (diskfs_tombstone(disk_table[idx].data_lba) != 0) return -1;
     disk_table[idx].deleted = 1;
     if (bcache_sync() != 0) return -1;
