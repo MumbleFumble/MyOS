@@ -168,6 +168,11 @@ struct pfweights_out {
     unsigned int neg;
 };
 long sys_pfweights(unsigned int mode, struct pfweights_out *out);
+struct df_out {
+    unsigned int cap_sectors, free_sectors, records, live_records,
+                 live_sectors, dead_records, dead_sectors;
+};
+long sys_df(struct df_out *out);
 long sys_funlink(const char *path);
 long sys_frename(const char *old_path, const char *new_path);
 struct tcpaccept_out {

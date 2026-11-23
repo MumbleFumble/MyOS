@@ -572,6 +572,33 @@ static void cmd_tcpechosrv(const char *arg)
     puts_u("tcpechosrv: closed\r\n");
 }
 
+/* df (Phase 13 inc.5): MyFS capacity / free-space report.
+ * Figures come from SYS_DF (the filesystem's own live
+ * bookkeeping) and agree with scripts/fsck_myfs.py on the
+ * same image: records walked == live + tombstones. */
+static void cmd_df(const char *arg)
+{
+    (void)arg;
+    struct df_out o;
+    char buf[16];
+    if (sys_df(&o) != 0) { puts_u("df: not mounted\r\n"); return; }
+    puts_u("df: capacity ");
+    puts_u(itoa((long)o.cap_sectors, buf));
+    puts_u(" sectors, free ");
+    puts_u(itoa((long)o.free_sectors, buf));
+    puts_u("\r\n");
+    puts_u("df: live ");
+    puts_u(itoa((long)o.live_records, buf));
+    puts_u(" records, ");
+    puts_u(itoa((long)o.live_sectors, buf));
+    puts_u(" sectors\r\n");
+    puts_u("df: tombstones ");
+    puts_u(itoa((long)o.dead_records, buf));
+    puts_u(" records, ");
+    puts_u(itoa((long)o.dead_sectors, buf));
+    puts_u(" sectors\r\n");
+}
+
 /* httpd <port> <file> (Phase 12 inc.5): serve one connection.
  * Reads the request line (up to the first CRLF, bounded), then
  * replies HTTP/1.0 200 with the named MyFS file as the body,
@@ -835,6 +862,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "httpd")) { cmd_httpd(arg); puts_u("> "); continue; }
         if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
         if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
+        if (streq(cmd, "df")) { cmd_df(arg); puts_u("> "); continue; }
         if (streq(cmd, "rm")) { cmd_rm(arg); puts_u("> "); continue; }
         if (streq(cmd, "mv")) { cmd_mv(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }

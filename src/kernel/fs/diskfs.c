@@ -1,4 +1,5 @@
 #include "../fs/vfs.h"
+#include "diskfs.h"
 #include "../fs/myfs.h"
 #include "../drivers/ata.h"
 #include "bcache.h"
@@ -124,6 +125,34 @@ static int diskfs_readdir_op(vfs_node_t *dir, uint32_t index,
         seen++;
     }
     return -1;
+}
+
+/* Capacity snapshot for `df` (Phase 13 inc.5). Read-only: no
+ * record, table or superblock state changes. dead_* are the
+ * records that are not the live record of any file — by the
+ * write path's invariant every such record carries the
+ * tombstone flag (superseded records are tombstoned or, at
+ * the tail, rolled back), so dead_records matches the fsck
+ * oracle's tombstone count and live_records its live-file
+ * count on any image fsck calls CLEAN. */
+int diskfs_df(struct diskfs_df *out)
+{
+    if (!disk_mounted || !out) return -1;
+    uint32_t live = 0, live_sectors = 0;
+    for (int i = 0; i < disk_count; i++) {
+        if (disk_table[i].deleted) continue;
+        live++;
+        live_sectors += (uint32_t)((80 + disk_table[i].size + 511) / 512);
+    }
+    uint32_t used = disk_append_lba - 1;
+    out->cap_sectors  = disk_append_limit - 1;
+    out->free_sectors = disk_append_limit - disk_append_lba;
+    out->records      = disk_record_count;
+    out->live_records = live;
+    out->live_sectors = live_sectors;
+    out->dead_records = disk_record_count - live;
+    out->dead_sectors = used - live_sectors;
+    return 0;
 }
 
 /* -----------------------------------------------------------------------

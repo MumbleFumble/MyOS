@@ -20,3 +20,19 @@ int diskfs_readdir(uint32_t index, char name_out[VFS_NAME_MAX]);
 
 /* Returns 1 if a disk is mounted. */
 int diskfs_is_mounted(void);
+
+/* Capacity snapshot for the shell `df` command (Phase 13
+ * inc.5). All figures come from the filesystem's live
+ * bookkeeping: the append pointer, the superblock record
+ * count and the in-memory live-file table. Read-only. */
+struct diskfs_df {
+    uint32_t cap_sectors;   /* sectors available to the log */
+    uint32_t free_sectors;  /* append_limit - append_lba */
+    uint32_t records;       /* total log records (superblock) */
+    uint32_t live_records;  /* == live files (one record each) */
+    uint32_t live_sectors;  /* sectors held by live records */
+    uint32_t dead_records;  /* tombstones / superseded records */
+    uint32_t dead_sectors;  /* sectors they hold (compaction) */
+};
+/* Fill *out with the capacity snapshot. 0 or -1. */
+int diskfs_df(struct diskfs_df *out);

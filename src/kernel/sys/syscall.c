@@ -8,6 +8,7 @@
 #include "../arch/exceptions.h"
 #include "../proc/elf.h"
 #include "../fs/vfs.h"
+#include "../fs/diskfs.h"
 #include "../mem/vmm.h"
 #include "../mem/pmm.h"
 #include "../mem/kheap.h"
@@ -767,6 +768,20 @@ static int64_t sys_pfweights(uint64_t mode, uint64_t out_va)
     return -1;
 }
 
+/* SYS_DF (Phase 13 inc.5): MyFS capacity reporting for the
+ * shell `df` command. The out struct mirrors struct diskfs_df
+ * in diskfs.h field for field (all uint32_t). */
+struct df_out {
+    uint32_t cap_sectors, free_sectors, records, live_records,
+             live_sectors, dead_records, dead_sectors;
+};
+
+static int64_t sys_df(uint64_t out_va)
+{
+    if (!out_va) return -1;
+    return diskfs_df((struct diskfs_df *)out_va);
+}
+
 /* SYS_FUNLINK / SYS_FRENAME (Phase 11): delete and rename
  * disk files via the VFS. */
 static int64_t sys_funlink(uint64_t path_va)
@@ -827,6 +842,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TCPSRV_CLOSE: return sys_tcpsrv_close();
     case SYS_TCPSRV_SEND: return sys_tcpsrv_send(arg1, arg2);
     case SYS_TCPSRV_RECV: return sys_tcpsrv_recv(arg1, arg2);
+    case SYS_DF: return sys_df(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

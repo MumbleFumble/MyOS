@@ -270,6 +270,13 @@ sys_tcpsrv_recv:
     int  0x80
     ret
 
+/* long sys_df(struct df_out *out) */
+.global sys_df
+sys_df:
+    mov  rax, 41        /* SYS_DF */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:
