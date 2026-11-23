@@ -111,7 +111,7 @@ shutdown
 
 OUT="$(python3 "$ROOT/scripts/fsck_myfs.py" "$TMP/churn.img")" \
   || fail "churn image not fsck-CLEAN: $OUT"
-echo "$OUT" | grep -q "63 records walked, 3 live files, 60 tombstones" \
+echo "$OUT" | grep -q "3 records walked, 3 live files, 0 tombstones" \
   || fail "churn image counts wrong (rollback not freeing?): $OUT"
 echo "[test] churn image: $OUT"
 
@@ -143,7 +143,7 @@ shutdown
 
 OUT="$(python3 "$ROOT/scripts/fsck_myfs.py" "$TMP/oracle.img")" \
   || fail "oracle image not fsck-CLEAN: $OUT"
-echo "$OUT" | grep -q "7 records walked, 2 live files, 5 tombstones" \
+echo "$OUT" | grep -q "2 records walked, 2 live files, 0 tombstones" \
   || fail "oracle image counts wrong (expected the tail rollback to remove one record): $OUT"
 echo "[test] oracle image: $OUT"
 

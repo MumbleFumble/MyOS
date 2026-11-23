@@ -156,6 +156,25 @@ static int diskfs_tombstone(uint32_t record_lba)
     return bcache_write(record_lba, sec);
 }
 
+/* Phase 13: tail rollback, shared by delete (inc.2) and the
+ * write_op/create supersede paths (inc.3). If the record at
+ * `start` spanning `sects` sectors is the last record in the
+ * log, remove it from the log: the append pointer returns to
+ * `start`, the record count decrements, and the superblock is
+ * rewritten, so the mount walk and fsck see exactly the
+ * remaining records and the next append reuses the space.
+ * Returns 1 if rolled back, 0 if the record is not the tail,
+ * -1 if the superblock rewrite failed. */
+static int diskfs_rollback_tail(uint32_t start, uint32_t sects)
+{
+    if (disk_record_count == 0) return 0;
+    if (start + sects != disk_append_lba) return 0;
+    disk_append_lba   = start;
+    disk_record_count--;
+    if (diskfs_write_super() != 0) return -1;
+    return 1;
+}
+
 /* Append one record (header + data) at disk_append_lba. Returns
  * the record LBA, or -1 (no space / write error). */
 static int64_t diskfs_append_record(const char *name,
@@ -221,9 +240,28 @@ static int64_t diskfs_write_op(vfs_node_t *node, uint64_t offset,
     for (uint64_t i = 0; i < len; i++) content[offset + i] = buf[i];
 
     uint32_t old_lba = priv->record_lba;
+    /* Phase 13 inc.3: tail free for the superseded record. The
+     * new content is fully built above from the old record, so
+     * when the old record is the tail it can be rolled back
+     * BEFORE the append and the new record lands in its place
+     * (no tombstone). The space check keeps the old failure
+     * semantics: if the new record would not fit even in the
+     * freed space, nothing is rolled back and the append below
+     * fails exactly as it would have before, leaving the old
+     * record intact. Non-tail records keep the tombstone. */
+    int rolled = 0;
+    if (old_lba) {
+        uint32_t old_sects = (uint32_t)((80 + e->size + 511) / 512);
+        uint32_t new_sects = (uint32_t)((80 + new_size + 511) / 512);
+        if (old_lba + new_sects <= disk_append_limit) {
+            int rb = diskfs_rollback_tail(old_lba, old_sects);
+            if (rb < 0) return -1;
+            rolled = rb;
+        }
+    }
     int64_t nl = diskfs_append_record(e->name, content, new_size);
     if (nl < 0) return -1;
-    if (old_lba) diskfs_tombstone(old_lba);  /* new record wins anyway */
+    if (old_lba && !rolled) diskfs_tombstone(old_lba);  /* new record wins anyway */
     e->size          = new_size;
     e->data_lba      = (uint32_t)nl;
     priv->record_lba = (uint32_t)nl;
@@ -371,9 +409,23 @@ vfs_node_t *diskfs_create(const char *name)
         disk_table[idx].data_lba = (uint32_t)nl;
         disk_table[idx].deleted  = 0;
     } else {
+        /* Phase 13 inc.3: tail free, same shape as write_op: if
+         * the entry's current record is the tail, roll it back
+         * before appending the empty record and skip the
+         * tombstone. The tombstone is also skipped when the
+         * append lands exactly on the old record's start: that
+         * means the old record was already rolled out of the
+         * log (e.g. by an inc.2 tail delete), so there is
+         * nothing to tombstone and the flag would land on the
+         * NEW record. Otherwise the tombstone path is today's. */
+        uint32_t old_lba   = disk_table[idx].data_lba;
+        uint32_t old_sects = (uint32_t)((80 + disk_table[idx].size + 511) / 512);
+        int rb = diskfs_rollback_tail(old_lba, old_sects);
+        if (rb < 0) return 0;
         int64_t nl = diskfs_append_record(disk_table[idx].name, &empty, 0);
         if (nl < 0) return 0;
-        diskfs_tombstone(disk_table[idx].data_lba);
+        if (!rb && (uint32_t)nl != old_lba)
+            diskfs_tombstone(old_lba);
         disk_table[idx].size     = 0;
         disk_table[idx].data_lba = (uint32_t)nl;
         disk_table[idx].deleted  = 0;
@@ -403,10 +455,9 @@ int diskfs_delete(const char *name)
      * the tombstone path below, unchanged. */
     uint32_t start = disk_table[idx].data_lba;
     uint32_t sects = (uint32_t)((80 + disk_table[idx].size + 511) / 512);
-    if (disk_record_count > 0 && start + sects == disk_append_lba) {
-        disk_append_lba   = start;
-        disk_record_count--;
-        if (diskfs_write_super() != 0) return -1;
+    int rb = diskfs_rollback_tail(start, sects);
+    if (rb < 0) return -1;
+    if (rb > 0) {
         disk_table[idx].deleted = 1;
         if (bcache_sync() != 0) return -1;
         return 0;
