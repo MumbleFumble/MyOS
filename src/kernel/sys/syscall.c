@@ -222,6 +222,183 @@ static struct file *fd_get(uint64_t fd)
     return f;
 }
 
+/* -----------------------------------------------------------------------
+ * Pipes (Phase 14 inc.3). One struct pipe is a bounded ring
+ * buffer shared by two descriptions: a read end and a write
+ * end. readers/writers count live END DESCRIPTIONS (0 or 1
+ * each), never aliases: the end close ops run once per end
+ * (desc_put, at the end's last alias), so dup2 aliasing an
+ * end is transparent to the pipe. The close that takes both
+ * counts to 0 returns the pipe to its pool.
+ *
+ * Semantics are NON-BLOCKING (a task blocking on its own
+ * pipe would deadlock; cross-task pipes do not exist yet):
+ *   read:  buffered bytes first (short count allowed);
+ *          empty + writers > 0 -> E_WOULDBLOCK (-2);
+ *          empty + writers == 0 -> 0 (EOF, after draining).
+ *   write: readers == 0 -> -1; no free space -> -2;
+ *          otherwise copies what fits and returns the short
+ *          count. Unread bytes are never dropped or
+ *          overwritten. count == 0 returns 0 in both ops.
+ * Ring mutations run in one IRQ-off section per call (the
+ * state cannot be shared across tasks yet; the section is
+ * bounded by the 1024-byte capacity).
+ * ----------------------------------------------------------------------- */
+#define PIPE_CAP 1024
+#define PIPE_POOL_N 16
+
+struct pipe {
+    uint8_t  buf[PIPE_CAP];
+    uint32_t head;      /* next byte to read */
+    uint32_t tail;      /* next byte to write */
+    uint32_t count;     /* bytes buffered (full vs empty) */
+    int      readers;   /* live read-end descriptions: 0/1 */
+    int      writers;   /* live write-end descriptions: 0/1 */
+    int      in_use;
+};
+static struct pipe pipe_pool[PIPE_POOL_N];
+
+static int64_t pipe_read(struct file *f, uint8_t *buf, uint64_t count)
+{
+    if (count == 0) return 0;
+    struct pipe *pp = f->pipe;
+    uint64_t fl = fd_cli_save();
+    if (pp->count == 0) {
+        int w = pp->writers;
+        fd_restore(fl);
+        return w ? E_WOULDBLOCK : 0;
+    }
+    uint64_t n = count < pp->count ? count : pp->count;
+    for (uint64_t i = 0; i < n; i++) {
+        buf[i] = pp->buf[pp->head];
+        pp->head = (pp->head + 1) & (PIPE_CAP - 1);
+    }
+    pp->count -= (uint32_t)n;
+    fd_restore(fl);
+    return (int64_t)n;
+}
+
+static int64_t pipe_write(struct file *f, const uint8_t *buf,
+                          uint64_t count)
+{
+    if (count == 0) return 0;
+    struct pipe *pp = f->pipe;
+    uint64_t fl = fd_cli_save();
+    if (pp->readers == 0) { fd_restore(fl); return -1; }
+    uint32_t freeb = PIPE_CAP - pp->count;
+    if (freeb == 0) { fd_restore(fl); return E_WOULDBLOCK; }
+    uint64_t n = count < freeb ? count : freeb;
+    for (uint64_t i = 0; i < n; i++) {
+        pp->buf[pp->tail] = buf[i];
+        pp->tail = (pp->tail + 1) & (PIPE_CAP - 1);
+    }
+    pp->count += (uint32_t)n;
+    fd_restore(fl);
+    return (int64_t)n;
+}
+
+static int64_t pipe_read_close(struct file *f)
+{
+    struct pipe *pp = f->pipe;
+    uint64_t fl = fd_cli_save();
+    pp->readers--;
+    if (pp->readers == 0 && pp->writers == 0) pp->in_use = 0;
+    fd_restore(fl);
+    return 0;
+}
+
+static int64_t pipe_write_close(struct file *f)
+{
+    struct pipe *pp = f->pipe;
+    uint64_t fl = fd_cli_save();
+    pp->writers--;
+    if (pp->readers == 0 && pp->writers == 0) pp->in_use = 0;
+    fd_restore(fl);
+    return 0;
+}
+
+static const struct fd_ops pipe_read_ops = {
+    .read = pipe_read, .write = 0, .close = pipe_read_close
+};
+static const struct fd_ops pipe_write_ops = {
+    .read = 0, .write = pipe_write, .close = pipe_write_close
+};
+
+/* Reserve a pool description (refcount 1, zeroed, never
+ * published). Paired with desc_return_raw for the rollback
+ * path of a multi-description creation: nothing was ever
+ * visible, so no close op runs. */
+static struct file *desc_grab_raw(void)
+{
+    uint64_t fl = fd_cli_save();
+    struct file *f = 0;
+    for (int i = 0; i < FD_DESC_POOL; i++) {
+        if (desc_pool[i].refcount == 0) { f = &desc_pool[i]; break; }
+    }
+    if (f) {
+        f->node = 0; f->ops = 0; f->offset = 0; f->flags = 0;
+        f->refcount = 1;
+    }
+    fd_restore(fl);
+    return f;
+}
+
+static void desc_return_raw(struct file *f)
+{
+    uint64_t fl = fd_cli_save();
+    f->node = 0; f->ops = 0; f->offset = 0; f->flags = 0;
+    f->refcount = 0;
+    fd_restore(fl);
+}
+
+/* SYS_PIPE: pipe(fds_out) -> 0 or -1. Installs the read end
+ * in the lower of the two lowest free slots >= 3 and the
+ * write end in the other. All-or-nothing: on any failure
+ * nothing is installed and nothing leaks. */
+static int64_t sys_pipe(uint64_t fds_va)
+{
+    if (!fds_va) return -1;
+    struct task *t = sched_current_task();
+    int rslot = -1, wslot = -1;
+    for (int fd = 3; fd < MAX_FDS; fd++) {
+        if (!t->fds[fd]) {
+            if (rslot < 0) rslot = fd;
+            else { wslot = fd; break; }
+        }
+    }
+    if (rslot < 0 || wslot < 0) return -1;
+
+    uint64_t fl = fd_cli_save();
+    struct pipe *pp = 0;
+    for (int i = 0; i < PIPE_POOL_N; i++) {
+        if (!pipe_pool[i].in_use) { pp = &pipe_pool[i]; break; }
+    }
+    if (pp) {
+        pp->head = pp->tail = pp->count = 0;
+        pp->readers = 1; pp->writers = 1; pp->in_use = 1;
+    }
+    fd_restore(fl);
+    if (!pp) return -1;
+
+    struct file *fr = desc_grab_raw();
+    struct file *fw = fr ? desc_grab_raw() : 0;
+    if (!fr || !fw) {
+        if (fr) desc_return_raw(fr);
+        fl = fd_cli_save(); pp->in_use = 0; fd_restore(fl);
+        return -1;
+    }
+    fr->pipe = pp; fr->ops = &pipe_read_ops;  fr->flags = FILE_PIPE_R;
+    fw->pipe = pp; fw->ops = &pipe_write_ops; fw->flags = FILE_PIPE_W;
+
+    /* Caller's array first, then publish the slots. */
+    int64_t *out = (int64_t *)fds_va;
+    out[0] = rslot;
+    out[1] = wslot;
+    t->fds[rslot] = fr;
+    t->fds[wslot] = fw;
+    return 0;
+}
+
 /* SYS_WRITE: write(fd, buf, count) */
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
 {
@@ -1026,6 +1203,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_DF: return sys_df(arg1);
     case SYS_BCACHE_PROBE: return sys_bcache_probe(arg1);
     case SYS_DUP2:    return sys_dup2(arg1, arg2);
+    case SYS_PIPE:    return sys_pipe(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

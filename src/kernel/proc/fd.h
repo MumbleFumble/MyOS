@@ -27,6 +27,14 @@ struct file;
 struct task;
 
 #define FILE_STATIC 0x1u   /* static shared description (console) */
+#define FILE_PIPE_R 0x2u   /* pipe read-end description */
+#define FILE_PIPE_W 0x4u   /* pipe write-end description */
+
+/* Would-block sentinel for non-blocking pipe I/O (Phase 14
+ * inc.3): distinct from -1 (error) and 0 (EOF) so a caller
+ * can tell "empty/full but still open" apart from both.
+ * Mirrored in src/lib/syscall.h for user code. */
+#define E_WOULDBLOCK (-2)
 
 struct fd_ops {
     int64_t (*read)(struct file *f, uint8_t *buf, uint64_t count);
@@ -34,8 +42,13 @@ struct fd_ops {
     int64_t (*close)(struct file *f);
 };
 
+struct pipe;
+
 struct file {
-    struct vfs_node     *node;     /* backing node (file fds); NULL for console */
+    union {
+        struct vfs_node *node;  /* file descriptions */
+        struct pipe     *pipe;  /* pipe end descriptions */
+    };
     const struct fd_ops *ops;      /* dispatch table; NULL only on a free pool entry */
     uint64_t             offset;   /* byte position, shared by all aliases */
     int32_t              refcount; /* aliases; pool entries: 0 = free */

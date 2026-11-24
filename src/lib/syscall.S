@@ -290,6 +290,13 @@ sys_dup2:
     int  0x80
     ret
 
+/* long sys_pipe(long *fds_out) */
+.global sys_pipe
+sys_pipe:
+    mov  rax, 44        /* SYS_PIPE */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

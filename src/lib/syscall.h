@@ -175,6 +175,12 @@ struct df_out {
 long sys_df(struct df_out *out);
 long sys_bcache_probe(long lba);
 long sys_dup2(long oldfd, long newfd);
+/* Would-block sentinel for non-blocking pipe I/O: the call
+ * cannot complete now but the fd is fine (pipe empty with a
+ * writer still open, or full). Distinct from -1 (error) and
+ * 0 (EOF). Mirrors E_WOULDBLOCK in the kernel's fd.h. */
+#define E_WOULDBLOCK (-2)
+long sys_pipe(long *fds_out);
 long sys_funlink(const char *path);
 long sys_frename(const char *old_path, const char *new_path);
 struct tcpaccept_out {

@@ -46,6 +46,7 @@
 #define SYS_DF 41          /* df(out) -> 0 or -1 (Phase 13) */
 #define SYS_BCACHE_PROBE 42 /* bcache_probe(lba) -> state bits (Phase 13) */
 #define SYS_DUP2 43        /* dup2(oldfd, newfd) -> newfd or -1 (Phase 14) */
+#define SYS_PIPE 44        /* pipe(fds_out) -> 0 or -1 (Phase 14) */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */
