@@ -828,6 +828,123 @@ static void cmd_mv(const char *arg)
     if (!oldn[0] || !arg[i]) { puts_u("usage: mv <old> <new>\r\n"); return; }
     puts_u(sys_frename(oldn, arg + i) == 0 ? "mv: renamed\r\n" : "mv: failed\r\n");
 }
+/* ------------------------------------------------------------------
+ * Shell parser (Phase 14 inc.4). Tokenises a command line into
+ * pipeline stages (an argv array per stage, NULL-terminated)
+ * plus an optional redirection target. Separators are spaces
+ * and tabs (runs collapse; leading/trailing ignored for the
+ * token structure). '|' and '>' are operator tokens even when
+ * adjacent to words. There is no quoting or escaping: a quote
+ * character is ordinary, and '|' / '>' anywhere on the line is
+ * an operator; '<', ';' and '&' are ordinary characters.
+ * Pipelines and redirection are parsed but NOT executed yet:
+ * a valid line using them reports PARSE_UNSUPPORTED. The
+ * grammar follows POSIX placement: the word after '>' is the
+ * target and other words stay arguments of their stage.
+ * Arrays are sized to the 255-char line, so no line can
+ * overflow them and there is no "too complex" error.
+ * ------------------------------------------------------------------ */
+#define TOK_WORD 0
+#define TOK_PIPE 1
+#define TOK_GT   2
+
+#define PARSE_OK          0
+#define PARSE_EMPTY       1   /* no tokens: just re-prompt */
+#define PARSE_ERROR       2   /* parse_err names it */
+#define PARSE_UNSUPPORTED 3   /* valid, but uses | or > */
+
+static char        tokbuf[256];
+static int         tok_kind[256];
+static int         tok_start[256];
+static char       *tok_ptr[256];
+static int         ntok_g;
+static char       *stg_argv[384];
+static int         stg_argc[128];
+static int         nstages_g;
+static char       *redirect_g;
+static const char *parse_err;
+
+static int shell_parse(const char *line)
+{
+    /* Tokenise a scratch copy; the original line is kept for
+     * the raw-remainder arg and the echo fallback. A word's
+     * terminating delimiter is read BEFORE it is overwritten
+     * with a NUL, so an adjacent operator is never destroyed. */
+    int li = 0;
+    while (line[li] && li < 255) { tokbuf[li] = line[li]; li++; }
+    tokbuf[li] = '\0';
+
+    ntok_g = 0;
+    int i = 0;
+    while (tokbuf[i]) {
+        char c = tokbuf[i];
+        if (c == ' ' || c == '\t') { i++; continue; }
+        if (c == '|' || c == '>') {
+            tok_kind[ntok_g] = (c == '|') ? TOK_PIPE : TOK_GT;
+            tok_ptr[ntok_g] = (char *)((c == '|') ? "|" : ">");
+            tok_start[ntok_g] = i;
+            ntok_g++; i++; continue;
+        }
+        int st = i;
+        while (tokbuf[i] && tokbuf[i] != ' ' && tokbuf[i] != '\t' &&
+               tokbuf[i] != '|' && tokbuf[i] != '>')
+            i++;
+        char d = tokbuf[i];
+        tokbuf[i] = '\0';
+        tok_kind[ntok_g] = TOK_WORD;
+        tok_ptr[ntok_g] = tokbuf + st;
+        tok_start[ntok_g] = st;
+        ntok_g++;
+        if (!d) break;
+        if (d == '|' || d == '>') {
+            tok_kind[ntok_g] = (d == '|') ? TOK_PIPE : TOK_GT;
+            tok_ptr[ntok_g] = (char *)((d == '|') ? "|" : ">");
+            tok_start[ntok_g] = i;
+            ntok_g++;
+        }
+        i++;
+    }
+    if (ntok_g == 0) return PARSE_EMPTY;
+
+    /* Grammar scan, left to right; the first error wins. */
+    int na = 0, nst = 0, argc = 0;
+    redirect_g = 0; parse_err = 0;
+    for (int k = 0; k < ntok_g; k++) {
+        if (tok_kind[k] == TOK_PIPE) {
+            if (argc == 0) {
+                parse_err = "empty command in pipeline";
+                return PARSE_ERROR;
+            }
+            stg_argv[na++] = 0; stg_argc[nst++] = argc; argc = 0;
+        } else if (tok_kind[k] == TOK_GT) {
+            if (redirect_g) {
+                parse_err = "multiple redirections";
+                return PARSE_ERROR;
+            }
+            if (k + 1 < ntok_g && tok_kind[k+1] == TOK_GT &&
+                tok_start[k+1] == tok_start[k] + 1) {
+                parse_err = "'>>' (append) not supported";
+                return PARSE_ERROR;
+            }
+            if (k + 1 >= ntok_g || tok_kind[k+1] != TOK_WORD) {
+                parse_err = "missing redirect target";
+                return PARSE_ERROR;
+            }
+            redirect_g = tok_ptr[k+1];
+            k++;
+        } else {
+            stg_argv[na++] = tok_ptr[k]; argc++;
+        }
+    }
+    if (argc == 0) {
+        parse_err = nst ? "empty command in pipeline" : "missing command";
+        return PARSE_ERROR;
+    }
+    stg_argv[na++] = 0; stg_argc[nst++] = argc;
+    nstages_g = nst;
+    return (nst > 1 || redirect_g) ? PARSE_UNSUPPORTED : PARSE_OK;
+}
+
 void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
@@ -841,15 +958,36 @@ void _start(long argc, char **argv)
         if (n > 0 && line[n-1] == '\n') line[--n] = '\0';
         if (n == 0) { puts_u("> "); continue; }
 
-        /* Split line into cmd and arg (first space separates them) */
-        char cmd[64], arg[192];
-        int ci = 0, ai = 0, in_arg = 0;
-        for (int i = 0; line[i]; i++) {
-            if (!in_arg && line[i] == ' ') { in_arg = 1; continue; }
-            if (!in_arg) { if (ci < 63)  cmd[ci++] = line[i]; }
-            else         { if (ai < 191) arg[ai++] = line[i]; }
+        /* Parse the line (Phase 14 inc.4). A plain command
+         * feeds the dispatch chain below with cmd/arg as the
+         * old first-space split produced them, with ONE
+         * change: the separator run after the command word
+         * no longer leaks into arg. arg is the raw remainder
+         * of the line starting at the second token (inner and
+         * trailing bytes byte-identical to before), and cmd
+         * is the first token; both keep their old copy caps. */
+        int pr = shell_parse(line);
+        if (pr == PARSE_EMPTY) { puts_u("> "); continue; }
+        if (pr == PARSE_ERROR) {
+            puts_u("shell: parse error: "); puts_u(parse_err);
+            puts_u("\r\n> "); continue;
         }
-        cmd[ci] = '\0'; arg[ai] = '\0';
+        if (pr == PARSE_UNSUPPORTED) {
+            puts_u("shell: pipes/redirection not yet supported\r\n> ");
+            continue;
+        }
+        char cmd[64], arg[192];
+        {
+            const char *w = stg_argv[0];
+            int ci = 0;
+            while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
+            cmd[ci] = '\0';
+            const char *a = (ntok_g > 1) ? line + tok_start[1]
+                                         : line + n;
+            int ai = 0;
+            while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
+            arg[ai] = '\0';
+        }
 
         if (streq(cmd, "exit"))    { puts_u("bye!\r\n"); sys_exit(0); }
         if (streq(cmd, "clear"))   { sys_clear(); puts_u("> "); continue; }
