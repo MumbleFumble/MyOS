@@ -7,9 +7,10 @@
 #  - collapsed separators now work: "cat  words.txt" (two
 #    spaces) reads the file (the old first-space split handed
 #    arg a leading space and the open failed);
-#  - "cat words.txt|cat" and "cat words.txt > out.txt" print
-#    the not-yet-supported message and execute nothing
-#    (out.txt is never created);
+#  - "cat words.txt|cat" prints the pipelines not-yet-supported
+#    message and executes nothing; "cat words.txt > out.txt"
+#    EXECUTES since Phase 14 inc.5 (out.txt is created with the
+#    file's contents; positive coverage in test_shellred.sh);
 #  - "| cat", "cat words.txt >" and "cat words.txt > a > b"
 #    print their named parse errors;
 #  - an ordinary command still runs after error lines, the
@@ -91,12 +92,12 @@ sleep 2
 [ "$(count 'alpha beta gamma' "$SER")" -ge 3 ] || fail "contents missing (plain/collapsed/after-error cats)"
 [ "$(count 'delta epsilon' "$SER")" -ge 1 ] || fail "appended line missing"
 [ "$(count 'not found:  words' "$SER")" -eq 0 ] || fail "double-space arg leak still present"
-[ "$(count 'shell: pipes/redirection not yet supported' "$SER")" -eq 2 ] || fail "not-yet-supported count != 2"
+[ "$(count 'shell: pipelines not yet supported' "$SER")" -eq 1 ] || fail "pipelines not-yet-supported count != 1"
 [ "$(count 'shell: parse error: empty command in pipeline' "$SER")" -eq 1 ] || fail "empty-stage error missing"
 [ "$(count 'shell: parse error: missing redirect target' "$SER")" -eq 1 ] || fail "missing-target error missing"
 [ "$(count 'shell: parse error: multiple redirections' "$SER")" -eq 1 ] || fail "multiple-redirections error missing"
-[ "$(count 'cat: not found: out.txt' "$SER")" -eq 1 ] || fail "cat out.txt did not report not found"
-[ "$(count 'out.txt' "$SER")" -eq 1 ] || fail "out.txt appeared somewhere else (ls listing?) - redirection executed?"
+[ "$(count 'cat: not found: out.txt' "$SER")" -eq 0 ] || fail "cat out.txt failed - redirection did not create it"
+[ "$(count 'out.txt' "$SER")" -eq 1 ] || fail "out.txt missing from the ls listing - redirection did not execute?"
 [ "$(count 'echo: frobnicate hello world' "$SER")" -eq 1 ] || fail "echo fallback changed"
 [ "$(count 'cat: not found: words.txt ' "$SER")" -eq 1 ] || fail "trailing space no longer reaches arg"
 
@@ -114,8 +115,9 @@ for _ in range(count):
         live[name] = img[off + 80: off + 80 + size]
     off += ((80 + size + 511) // 512) * 512
 assert live.get('words.txt') == b'alpha beta gamma\ndelta epsilon\n', live.get('words.txt')
-assert 'out.txt' not in live and 'a' not in live and 'b' not in live, list(live)
-print("[test] host-side image check: words.txt byte-identical, no out.txt/a/b created")
+assert live.get('out.txt') == b'alpha beta gamma\ndelta epsilon\n', live.get('out.txt')
+assert 'a' not in live and 'b' not in live, list(live)
+print("[test] host-side image check: words.txt byte-identical, out.txt created by redirection, no a/b created")
 PYEOF
 
 echo "[test] PASS: parser preserves plain commands, rejects operators honestly, names parse errors"

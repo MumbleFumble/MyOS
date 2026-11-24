@@ -863,6 +863,11 @@ static int         stg_argc[128];
 static int         nstages_g;
 static char       *redirect_g;
 static const char *parse_err;
+static int         word_toks[256];  /* token index of each stage word */
+static int         nword_toks;
+static int         gt_tok;          /* token index of '>', or -1 */
+static int         prompt_nl;       /* set by dispatch_command (inc.5) */
+static long        redir_save;      /* saved console fd slot, or -1 */
 
 static int shell_parse(const char *line)
 {
@@ -909,6 +914,7 @@ static int shell_parse(const char *line)
     /* Grammar scan, left to right; the first error wins. */
     int na = 0, nst = 0, argc = 0;
     redirect_g = 0; parse_err = 0;
+    nword_toks = 0; gt_tok = -1;
     for (int k = 0; k < ntok_g; k++) {
         if (tok_kind[k] == TOK_PIPE) {
             if (argc == 0) {
@@ -917,6 +923,7 @@ static int shell_parse(const char *line)
             }
             stg_argv[na++] = 0; stg_argc[nst++] = argc; argc = 0;
         } else if (tok_kind[k] == TOK_GT) {
+            gt_tok = k;
             if (redirect_g) {
                 parse_err = "multiple redirections";
                 return PARSE_ERROR;
@@ -934,6 +941,7 @@ static int shell_parse(const char *line)
             k++;
         } else {
             stg_argv[na++] = tok_ptr[k]; argc++;
+            word_toks[nword_toks++] = k;
         }
     }
     if (argc == 0) {
@@ -942,8 +950,64 @@ static int shell_parse(const char *line)
     }
     stg_argv[na++] = 0; stg_argc[nst++] = argc;
     nstages_g = nst;
-    return (nst > 1 || redirect_g) ? PARSE_UNSUPPORTED : PARSE_OK;
+    return (nst > 1) ? PARSE_UNSUPPORTED : PARSE_OK;
 }
+
+/* Build arg for a redirected single-stage line (Phase 14
+ * inc.5). The plain-line feed (raw remainder from the second
+ * token) would include the "> target" text, so a redirected
+ * arg is the raw line span from the first argument word to
+ * the last argument word (word = a word token of the stage;
+ * the command word and the redirect target are excluded).
+ * If '>' sits between argument words (POSIX placement), the
+ * span is two raw segments joined with one space, the first
+ * segment's trailing separators stripped. Inner spacing is
+ * raw, so write's free text keeps its double spaces. With
+ * no quoting in the lexer, a word's raw end is exactly
+ * start + its length. */
+static void build_redirected_arg(const char *line, char *arg)
+{
+    int ai = 0;
+    if (nword_toks >= 2) {
+        int first = word_toks[1];
+        int last = word_toks[nword_toks - 1];
+        int last_end = tok_start[last] + (int)slen_u(tok_ptr[last]);
+        int split = -1;
+        if (gt_tok > first && gt_tok < last) {
+            for (int wi = 2; wi < nword_toks; wi++) {
+                if (word_toks[wi] > gt_tok) { split = word_toks[wi]; break; }
+            }
+        }
+        if (split < 0) {
+            for (int q = tok_start[first]; q < last_end && ai < 191; q++)
+                arg[ai++] = line[q];
+        } else {
+            int e1 = tok_start[gt_tok];
+            while (e1 > tok_start[first] &&
+                   (line[e1-1] == ' ' || line[e1-1] == '\t')) e1--;
+            for (int q = tok_start[first]; q < e1 && ai < 191; q++)
+                arg[ai++] = line[q];
+            if (ai && ai < 191) arg[ai++] = ' ';
+            for (int q = tok_start[split]; q < last_end && ai < 191; q++)
+                arg[ai++] = line[q];
+        }
+    }
+    arg[ai] = '\0';
+}
+
+/* Restore fd 1 from redir_save, if a redirected dispatch is
+ * somehow still active at the top of the main loop. */
+static void redir_restore(void)
+{
+    if (redir_save >= 0) {
+        sys_dup2(redir_save, 1);
+        sys_close(redir_save);
+        redir_save = -1;
+    }
+}
+
+static void dispatch_command(const char *cmd, const char *arg,
+                             const char *line, long n);
 
 void _start(long argc, char **argv)
 {
@@ -951,7 +1015,9 @@ void _start(long argc, char **argv)
     sys_clear();
     puts_u("MyOS shell v0.3\r\nType 'help' for commands.\r\n> ");
 
+    redir_save = -1;
     for (;;) {
+        redir_restore();
         char line[256];
         long n = readline(line, 256);
         if (n <= 0) continue;
@@ -973,7 +1039,7 @@ void _start(long argc, char **argv)
             puts_u("\r\n> "); continue;
         }
         if (pr == PARSE_UNSUPPORTED) {
-            puts_u("shell: pipes/redirection not yet supported\r\n> ");
+            puts_u("shell: pipelines not yet supported\r\n> ");
             continue;
         }
         char cmd[64], arg[192];
@@ -982,165 +1048,221 @@ void _start(long argc, char **argv)
             int ci = 0;
             while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
             cmd[ci] = '\0';
-            const char *a = (ntok_g > 1) ? line + tok_start[1]
-                                         : line + n;
-            int ai = 0;
-            while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
-            arg[ai] = '\0';
+            if (redirect_g) {
+                build_redirected_arg(line, arg);
+            } else {
+                const char *a = (ntok_g > 1) ? line + tok_start[1]
+                                             : line + n;
+                int ai = 0;
+                while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
+                arg[ai] = '\0';
+            }
         }
 
-        if (streq(cmd, "exit"))    { puts_u("bye!\r\n"); sys_exit(0); }
-        if (streq(cmd, "clear"))   { sys_clear(); puts_u("> "); continue; }
-        if (streq(cmd, "memtest")) { cmd_memtest(); puts_u("> "); continue; }
-        if (streq(cmd, "sched"))   { cmd_sched();   puts_u("> "); continue; }
-        if (streq(cmd, "trace")) {
-            if (streq(arg, "full")) cmd_trace_full();
-            else cmd_trace();
-            puts_u("> "); continue;
-        }
-        if (streq(cmd, "pftrace")) { cmd_pftrace(); puts_u("> "); continue; }
-        if (streq(cmd, "iotrace")) { cmd_iotrace(); puts_u("> "); continue; }
-        if (streq(cmd, "acctrace")) { cmd_acctrace(); puts_u("> "); continue; }
-        if (streq(cmd, "bcachestat")) { cmd_bcachestat(); puts_u("> "); continue; }
-        if (streq(cmd, "dmastat")) { cmd_dmastat(); puts_u("> "); continue; }
-        if (streq(cmd, "wstat")) { cmd_wstat(); puts_u("> "); continue; }
-        if (streq(cmd, "sync")) { cmd_sync(); puts_u("> "); continue; }
-        if (streq(cmd, "write")) { cmd_write(arg); puts_u("> "); continue; }
-        if (streq(cmd, "netstat")) { cmd_netstat(); puts_u("> "); continue; }
-        if (streq(cmd, "netsend")) { cmd_netsend(); puts_u("> "); continue; }
-        if (streq(cmd, "ping")) { cmd_ping(arg); puts_u("> "); continue; }
-        if (streq(cmd, "dhcp")) { cmd_dhcp(); puts_u("> "); continue; }
-        if (streq(cmd, "nslookup")) { cmd_nslookup(arg); puts_u("> "); continue; }
-        if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); puts_u("> "); continue; }
-        if (streq(cmd, "tcplisten")) { cmd_tcplisten(arg); puts_u("> "); continue; }
-        if (streq(cmd, "tcpechosrv")) { cmd_tcpechosrv(arg); puts_u("> "); continue; }
-        if (streq(cmd, "httpd")) { cmd_httpd(arg); puts_u("> "); continue; }
-        if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
-        if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
-        if (streq(cmd, "df")) { cmd_df(arg); puts_u("> "); continue; }
-        if (streq(cmd, "bcprobe")) { cmd_bcprobe(arg); puts_u("> "); continue; }
-        if (streq(cmd, "rm")) { cmd_rm(arg); puts_u("> "); continue; }
-        if (streq(cmd, "mv")) { cmd_mv(arg); puts_u("> "); continue; }
-        if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }
-        if (streq(cmd, "prefetch")) {
-            long pi = -1;
-            if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
-            if (pi < 0 || pi > 4) { puts_u("usage: prefetch <0|1|2|3|4>  (0=none 1=seq 2=stride 3=learned 4=learned-online)\r\n> "); continue; }
-            long r = sys_prefetch_policy(pi);
-            puts_u(r == 0 ? "prefetch policy set\r\n> " : "prefetch: failed\r\n> ");
-            continue;
-        }
-
-        if (streq(cmd, "pfpolicy")) {
-            long pi = -1;
-            if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
-            if (pi != 0 && pi != 1) { puts_u("usage: pfpolicy <0|1>  (0=fifo  1=learned)\r\n> "); continue; }
-            long r = sys_pf_setpolicy(pi);
-            if (r < 0) puts_u("pfpolicy: unknown index\r\n> ");
-            else { puts_u("pf policy set to "); puts_u(pi ? "learned\r\n> " : "fifo\r\n> "); }
-            continue;
-        }
-        if (streq(cmd, "policy")) {
-            if (!arg[0]) {
-                puts_u("usage: policy <0|1|2>  (0=round-robin  1=weighted-fair  2=learned)\r\n> ");
+        if (redirect_g) {
+            if (streq(cmd, "exec")) {
+                puts_u("shell: redirection not supported for exec\r\n> ");
                 continue;
             }
-            long idx = arg[0] - '0';
-            long r   = sys_setpolicy(idx);
-            if (r < 0) {
-                puts_u("policy: unknown index\r\n> ");
-            } else {
-                puts_u("policy set to ");
-                puts_u(idx == SCHED_POLICY_ML ? "learned" :
-                        idx == SCHED_POLICY_WF ? "weighted-fair" : "round-robin");
-                puts_u("\r\n> ");
+            long tfd = sys_fcreate(redirect_g);
+            if (tfd < 0) {
+                puts_u("shell: cannot create "); puts_u(redirect_g);
+                puts_u("\r\n> "); continue;
             }
-            continue;
-        }
-
-        if (streq(cmd, "getpid")) {
-            char buf[16];
-            long pid = sys_getpid();
-            puts_u("pid: "); puts_u(itoa(pid, buf)); puts_u("\r\n> ");
-            continue;
-        }
-
-        if (streq(cmd, "ls")) {
-            char name[64];
-            long idx = 0;
-            while (sys_readdir(idx, name) == 0) {
-                puts_u(name); puts_u("\r\n");
-                idx++;
+            long sv = -1;
+            for (long k = 15; k >= 3; k--)
+                if (sys_dup2(k, k) < 0) { sv = k; break; }
+            if (sv < 0 || sys_dup2(1, sv) < 0) {
+                sys_close(tfd);
+                puts_u("shell: redirection failed\r\n> "); continue;
             }
+            redir_save = sv;
+            sys_dup2(tfd, 1);
+            sys_close(tfd);
+            /* The echo fallback must not see "> target":
+             * dispatch gets a rebuilt line (cmd + arg). */
+            char rline[256];
+            int ri = 0;
+            for (int j = 0; cmd[j] && ri < 250; j++) rline[ri++] = cmd[j];
+            if (arg[0]) {
+                rline[ri++] = ' ';
+                for (int j = 0; arg[j] && ri < 250; j++) rline[ri++] = arg[j];
+            }
+            rline[ri] = '\0';
+            dispatch_command(cmd, arg, rline, ri);
+            redir_restore();
             puts_u("> ");
             continue;
         }
-
-        if (streq(cmd, "cat")) {
-            if (!arg[0]) { puts_u("usage: cat <file>\r\n> "); continue; }
-            long fd = sys_open(arg);
-            if (fd < 0) { puts_u("cat: not found: "); puts_u(arg); puts_u("\r\n> "); continue; }
-            char buf[128];
-            long r;
-            while ((r = sys_read(fd, buf, 127)) > 0)
-                sys_write(STDOUT, buf, r);
-            sys_close(fd);
-            puts_u("\r\n> ");
-            continue;
-        }
-
-        if (streq(cmd, "pf")) {
-            /* Deliberately fault from ring 3: write to an unmapped
-             * address. Expect the #PF handler to fire with
-             * cr2=0x50000000000, err=0x6 (not-present, write, user). */
-            puts_u("pf: writing to unmapped 0x50000000000...\r\n");
-            *(volatile char *)0x50000000000UL = 42;
-            puts_u("pf: survived?!\r\n> ");
-            continue;
-        }
-
-        if (streq(cmd, "help")) {
-            puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, rm, mv, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, clear, exit\r\n> ");
-            continue;
-        }
-
-        if (streq(cmd, "date")) {
-            sys_time_t t;
-            sys_time(&t);
-            char buf[4];
-            /* YYYY-MM-DD HH:MM:SS */
-            puts_u(itoa(t.year,    buf)); puts_u("-");
-            if (t.month   < 10) puts_u("0");
-            puts_u(itoa(t.month,   buf)); puts_u("-");
-            if (t.day     < 10) puts_u("0");
-            puts_u(itoa(t.day,     buf)); puts_u(" ");
-            if (t.hours   < 10) puts_u("0");
-            puts_u(itoa(t.hours,   buf)); puts_u(":");
-            if (t.minutes < 10) puts_u("0");
-            puts_u(itoa(t.minutes, buf)); puts_u(":");
-            if (t.seconds < 10) puts_u("0");
-            puts_u(itoa(t.seconds, buf)); puts_u("\r\n> ");
-            continue;
-        }
-
-        if (streq(cmd, "exec")) {
-            if (!arg[0]) { puts_u("usage: exec <prog> [args]\r\n> "); continue; }
-            /* Program name is the first token; the full line
-             * (Phase 11 inc.4) becomes the child argv. */
-            char prog[64];
-            int pi2 = 0;
-            while (arg[pi2] && arg[pi2] != ' ' && pi2 < 63) { prog[pi2] = arg[pi2]; pi2++; }
-            prog[pi2] = 0;
-            long pid = sys_exec(prog, arg);
-            if (pid < 0) { puts_u("exec: failed\r\n> "); continue; }
-            sys_wait(pid);
-            puts_u("> ");
-            continue;
-        }
-
-        puts_u("echo: ");
-        sys_write(STDOUT, line, n);
-        puts_u("\r\n> ");
+        dispatch_command(cmd, arg, line, n);
+        puts_u(prompt_nl ? "\r\n> " : "> ");
     }
 }
 
+
+/* The builtin dispatch chain, extracted from the shell's
+ * main loop in Phase 14 inc.5 so a redirected run can swap
+ * fd 1 around exactly one dispatch. Branches no longer
+ * print the prompt: the caller prints it after dispatch
+ * returns (and after fd 1 is restored, when redirected).
+ * prompt_nl records the branches whose prompt used to be
+ * "\r\n> " because their output does not end with a
+ * newline; for them the caller prints "\r\n> ". */
+static void dispatch_command(const char *cmd, const char *arg,
+                             const char *line, long n)
+{
+    prompt_nl = 0;
+    if (streq(cmd, "exit"))    { puts_u("bye!\r\n"); sys_exit(0); }
+    if (streq(cmd, "clear"))   { sys_clear(); return; }
+    if (streq(cmd, "memtest")) { cmd_memtest(); return; }
+    if (streq(cmd, "sched"))   { cmd_sched();   return; }
+    if (streq(cmd, "trace")) {
+        if (streq(arg, "full")) cmd_trace_full();
+        else cmd_trace();
+        return;
+    }
+    if (streq(cmd, "pftrace")) { cmd_pftrace(); return; }
+    if (streq(cmd, "iotrace")) { cmd_iotrace(); return; }
+    if (streq(cmd, "acctrace")) { cmd_acctrace(); return; }
+    if (streq(cmd, "bcachestat")) { cmd_bcachestat(); return; }
+    if (streq(cmd, "dmastat")) { cmd_dmastat(); return; }
+    if (streq(cmd, "wstat")) { cmd_wstat(); return; }
+    if (streq(cmd, "sync")) { cmd_sync(); return; }
+    if (streq(cmd, "write")) { cmd_write(arg); return; }
+    if (streq(cmd, "netstat")) { cmd_netstat(); return; }
+    if (streq(cmd, "netsend")) { cmd_netsend(); return; }
+    if (streq(cmd, "ping")) { cmd_ping(arg); return; }
+    if (streq(cmd, "dhcp")) { cmd_dhcp(); return; }
+    if (streq(cmd, "nslookup")) { cmd_nslookup(arg); return; }
+    if (streq(cmd, "tcpecho")) { cmd_tcpecho(arg); return; }
+    if (streq(cmd, "tcplisten")) { cmd_tcplisten(arg); return; }
+    if (streq(cmd, "tcpechosrv")) { cmd_tcpechosrv(arg); return; }
+    if (streq(cmd, "httpd")) { cmd_httpd(arg); return; }
+    if (streq(cmd, "httpget")) { cmd_httpget(arg); return; }
+    if (streq(cmd, "pfweights")) { cmd_pfweights(arg); return; }
+    if (streq(cmd, "df")) { cmd_df(arg); return; }
+    if (streq(cmd, "bcprobe")) { cmd_bcprobe(arg); return; }
+    if (streq(cmd, "rm")) { cmd_rm(arg); return; }
+    if (streq(cmd, "mv")) { cmd_mv(arg); return; }
+    if (streq(cmd, "append")) { cmd_append(arg); return; }
+    if (streq(cmd, "prefetch")) {
+        long pi = -1;
+        if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
+        if (pi < 0 || pi > 4) { puts_u("usage: prefetch <0|1|2|3|4>  (0=none 1=seq 2=stride 3=learned 4=learned-online)\r\n"); return; }
+        long r = sys_prefetch_policy(pi);
+        puts_u(r == 0 ? "prefetch policy set\r\n" : "prefetch: failed\r\n");
+        return;
+    }
+
+    if (streq(cmd, "pfpolicy")) {
+        long pi = -1;
+        if (arg[0] >= '0' && arg[0] <= '9') pi = arg[0] - '0';
+        if (pi != 0 && pi != 1) { puts_u("usage: pfpolicy <0|1>  (0=fifo  1=learned)\r\n"); return; }
+        long r = sys_pf_setpolicy(pi);
+        if (r < 0) puts_u("pfpolicy: unknown index\r\n");
+        else { puts_u("pf policy set to "); puts_u(pi ? "learned\r\n" : "fifo\r\n"); }
+        return;
+    }
+    if (streq(cmd, "policy")) {
+        if (!arg[0]) {
+            puts_u("usage: policy <0|1|2>  (0=round-robin  1=weighted-fair  2=learned)\r\n");
+            return;
+        }
+        long idx = arg[0] - '0';
+        long r   = sys_setpolicy(idx);
+        if (r < 0) {
+            puts_u("policy: unknown index\r\n");
+        } else {
+            puts_u("policy set to ");
+            puts_u(idx == SCHED_POLICY_ML ? "learned" :
+                    idx == SCHED_POLICY_WF ? "weighted-fair" : "round-robin");
+            prompt_nl = 1;
+        }
+        return;
+    }
+
+    if (streq(cmd, "getpid")) {
+        char buf[16];
+        long pid = sys_getpid();
+        puts_u("pid: "); puts_u(itoa(pid, buf)); prompt_nl = 1;
+        return;
+    }
+
+    if (streq(cmd, "ls")) {
+        char name[64];
+        long idx = 0;
+        while (sys_readdir(idx, name) == 0) {
+            puts_u(name); puts_u("\r\n");
+            idx++;
+        }
+       
+        return;
+    }
+
+    if (streq(cmd, "cat")) {
+        if (!arg[0]) { puts_u("usage: cat <file>\r\n"); return; }
+        long fd = sys_open(arg);
+        if (fd < 0) { puts_u("cat: not found: "); puts_u(arg); prompt_nl = 1; return; }
+        char buf[128];
+        long r;
+        while ((r = sys_read(fd, buf, 127)) > 0)
+            sys_write(STDOUT, buf, r);
+        sys_close(fd);
+        prompt_nl = 1;
+        return;
+    }
+
+    if (streq(cmd, "pf")) {
+        /* Deliberately fault from ring 3: write to an unmapped
+         * address. Expect the #PF handler to fire with
+         * cr2=0x50000000000, err=0x6 (not-present, write, user). */
+        puts_u("pf: writing to unmapped 0x50000000000...\r\n");
+        *(volatile char *)0x50000000000UL = 42;
+        puts_u("pf: survived?!\r\n");
+        return;
+    }
+
+    if (streq(cmd, "help")) {
+        puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, rm, mv, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, clear, exit\r\n");
+        return;
+    }
+
+    if (streq(cmd, "date")) {
+        sys_time_t t;
+        sys_time(&t);
+        char buf[4];
+        /* YYYY-MM-DD HH:MM:SS */
+        puts_u(itoa(t.year,    buf)); puts_u("-");
+        if (t.month   < 10) puts_u("0");
+        puts_u(itoa(t.month,   buf)); puts_u("-");
+        if (t.day     < 10) puts_u("0");
+        puts_u(itoa(t.day,     buf)); puts_u(" ");
+        if (t.hours   < 10) puts_u("0");
+        puts_u(itoa(t.hours,   buf)); puts_u(":");
+        if (t.minutes < 10) puts_u("0");
+        puts_u(itoa(t.minutes, buf)); puts_u(":");
+        if (t.seconds < 10) puts_u("0");
+        puts_u(itoa(t.seconds, buf)); prompt_nl = 1;
+        return;
+    }
+
+    if (streq(cmd, "exec")) {
+        if (!arg[0]) { puts_u("usage: exec <prog> [args]\r\n"); return; }
+        /* Program name is the first token; the full line
+         * (Phase 11 inc.4) becomes the child argv. */
+        char prog[64];
+        int pi2 = 0;
+        while (arg[pi2] && arg[pi2] != ' ' && pi2 < 63) { prog[pi2] = arg[pi2]; pi2++; }
+        prog[pi2] = 0;
+        long pid = sys_exec(prog, arg);
+        if (pid < 0) { puts_u("exec: failed\r\n"); return; }
+        sys_wait(pid);
+       
+        return;
+    }
+
+    puts_u("echo: ");
+    sys_write(STDOUT, line, n);
+    prompt_nl = 1;
+}
+
