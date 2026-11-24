@@ -276,6 +276,12 @@ sys_df:
     mov  rax, 41        /* SYS_DF */
     int  0x80
     ret
+/* long sys_bcache_probe(long lba) */
+.global sys_bcache_probe
+sys_bcache_probe:
+    mov  rax, 42        /* SYS_BCACHE_PROBE */
+    int  0x80
+    ret
 
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy

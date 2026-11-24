@@ -489,6 +489,77 @@ void bcache_invalidate(void)
     bcache_restore(f);
 }
 
+/* Cache-state probe (Phase 13 inc.8): bit0 valid, bit1 dirty,
+ * bit2 prefetched-but-unused. Lets tests observe the cache
+ * directly instead of inferring it from hit counts. */
+int bcache_probe(uint32_t lba)
+{
+    uint64_t f = bcache_cli_save();
+    int idx = bcache_lookup(lba);
+    int bits = 0;
+    if (idx >= 0) {
+        bits = 1;
+        if (cache[idx].dirty) bits |= 2;
+        if (cache[idx].prefetched_unused) bits |= 4;
+    }
+    bcache_restore(f);
+    return bits;
+}
+
+/* Invalidate every entry in [lba, lba+count) (Phase 13 inc.8).
+ * Called when the filesystem frees a sector range (MyFS tail
+ * rollback): after the free, no cached copy of the range may
+ * survive to be served or written back over the record that
+ * reuses the sectors.
+ *
+ * Dirty semantics: REFUSE. If any entry in the range is dirty
+ * the function drops nothing and returns -1. A dirty entry
+ * holds the only copy of unwritten data; dropping it would
+ * lose that data, and writing it back from here would put
+ * this primitive in the write-ordering business. The call
+ * site (diskfs_rollback_tail) invokes it immediately after a
+ * successful bcache_sync(), so the range is clean by
+ * construction and the refusal cannot fire unless the write
+ * path's sync discipline breaks — in which case failing
+ * loudly is the point. Sector 0 is never a freed record
+ * sector and is refused as a range start.
+ *
+ * Shadow tags for the range are dropped too (they hold no
+ * data, but a stale tag would skew the pollution statistic
+ * for the reused sector). Queued prefetch entries are NOT
+ * removed: the worker reads the sector from disk when it
+ * processes an entry (under the ATA mutex, atomically with
+ * the insert, whose no-overwrite rule protects demand-written
+ * entries), so a queued entry carries no bytes across the
+ * free. Returns the number of cache entries dropped. */
+int bcache_invalidate_range(uint32_t lba, uint32_t count)
+{
+    if (lba == 0) return -1;
+    uint64_t f = bcache_cli_save();
+    for (uint32_t k = 0; k < count; k++) {
+        int idx = bcache_lookup(lba + k);
+        if (idx >= 0 && cache[idx].dirty) {
+            bcache_restore(f);
+            return -1;
+        }
+    }
+    int dropped = 0;
+    for (uint32_t k = 0; k < count; k++) {
+        int idx = bcache_lookup(lba + k);
+        if (idx >= 0) {
+            if (cache[idx].prefetched_unused)
+                prefetch_note_outcome(lba + k, 0);
+            cache[idx].valid = 0;
+            dropped++;
+        }
+        for (int i = 0; i < BCACHE_SIZE; i++)
+            if (shadow[i].valid && shadow[i].lba == lba + k)
+                shadow[i].valid = 0;
+    }
+    bcache_restore(f);
+    return dropped;
+}
+
 uint64_t bcache_hits(void)   { return stat_hits; }
 uint64_t bcache_misses(void) { return stat_misses; }
 

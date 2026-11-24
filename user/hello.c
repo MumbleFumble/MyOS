@@ -576,6 +576,23 @@ static void cmd_tcpechosrv(const char *arg)
  * Figures come from SYS_DF (the filesystem's own live
  * bookkeeping) and agree with scripts/fsck_myfs.py on the
  * same image: records walked == live + tombstones. */
+static void cmd_bcprobe(const char *arg)
+{
+    char buf[16];
+    long lba = 0;
+    if (!arg || !*arg) { puts_u("bcprobe: usage bcprobe <lba>\r\n"); return; }
+    while (*arg >= '0' && *arg <= '9') { lba = lba * 10 + (*arg - '0'); arg++; }
+    long bits = sys_bcache_probe(lba);
+    puts_u("bcprobe: lba ");
+    puts_u(itoa(lba, buf));
+    puts_u(" valid=");
+    puts_u(itoa((bits & 1) ? 1 : 0, buf));
+    puts_u(" dirty=");
+    puts_u(itoa((bits & 2) ? 1 : 0, buf));
+    puts_u(" prefetched=");
+    puts_u(itoa((bits & 4) ? 1 : 0, buf));
+    puts_u("\r\n");
+}
 static void cmd_df(const char *arg)
 {
     (void)arg;
@@ -863,6 +880,7 @@ void _start(long argc, char **argv)
         if (streq(cmd, "httpget")) { cmd_httpget(arg); puts_u("> "); continue; }
         if (streq(cmd, "pfweights")) { cmd_pfweights(arg); puts_u("> "); continue; }
         if (streq(cmd, "df")) { cmd_df(arg); puts_u("> "); continue; }
+        if (streq(cmd, "bcprobe")) { cmd_bcprobe(arg); puts_u("> "); continue; }
         if (streq(cmd, "rm")) { cmd_rm(arg); puts_u("> "); continue; }
         if (streq(cmd, "mv")) { cmd_mv(arg); puts_u("> "); continue; }
         if (streq(cmd, "append")) { cmd_append(arg); puts_u("> "); continue; }

@@ -54,6 +54,16 @@ void bcache_prefetch_insert(uint32_t lba, const uint8_t *data);
 /* Invalidate all entries (e.g., on unmount). */
 void bcache_invalidate(void);
 
+/* Invalidate every entry in [lba, lba+count) (Phase 13 inc.8),
+ * for when the filesystem frees a sector range. Refuses (-1,
+ * drops nothing) if any entry in the range is dirty or the
+ * range starts at sector 0. Returns entries dropped. */
+int bcache_invalidate_range(uint32_t lba, uint32_t count);
+
+/* Cache-state probe (Phase 13 inc.8): bit0 valid, bit1 dirty,
+ * bit2 prefetched-but-unused; 0 if the LBA is not cached. */
+int bcache_probe(uint32_t lba);
+
 /* Async prefetch (Phase 4 inc.2): queue LBA for the prefetch worker
  * instead of reading it synchronously. mru=1 inserts at the MRU end
  * (learned policy), mru=0 at the LRU end (baselines). No-op if the

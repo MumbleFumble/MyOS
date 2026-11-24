@@ -173,6 +173,7 @@ struct df_out {
                  live_sectors, dead_records, dead_sectors;
 };
 long sys_df(struct df_out *out);
+long sys_bcache_probe(long lba);
 long sys_funlink(const char *path);
 long sys_frename(const char *old_path, const char *new_path);
 struct tcpaccept_out {

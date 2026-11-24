@@ -223,6 +223,12 @@ static int diskfs_rollback_tail(uint32_t start, uint32_t sects)
     disk_record_count--;
     if (diskfs_write_super() != 0) return -1;
     if (bcache_sync() != 0) return -1;   /* Phase 13 inc.7: publish durably here, not at some later op's sync */
+    /* Phase 13 inc.8: the freed range must not survive in
+     * the block cache. The sync above guarantees the
+     * range is clean, so the invalidation drops it
+     * outright; -1 would mean the write path's sync
+     * discipline broke, and failing is correct. */
+    if (bcache_invalidate_range(start, sects) < 0) return -1;
     return 1;
 }
 

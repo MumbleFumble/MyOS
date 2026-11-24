@@ -768,6 +768,13 @@ static int64_t sys_pfweights(uint64_t mode, uint64_t out_va)
     return -1;
 }
 
+/* SYS_BCACHE_PROBE (Phase 13 inc.8): cache-state probe for
+ * tests: bit0 valid, bit1 dirty, bit2 prefetched-unused. */
+static int64_t sys_bcache_probe(uint64_t lba)
+{
+    return bcache_probe((uint32_t)lba);
+}
+
 /* SYS_DF (Phase 13 inc.5): MyFS capacity reporting for the
  * shell `df` command. The out struct mirrors struct diskfs_df
  * in diskfs.h field for field (all uint32_t). */
@@ -843,6 +850,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TCPSRV_SEND: return sys_tcpsrv_send(arg1, arg2);
     case SYS_TCPSRV_RECV: return sys_tcpsrv_recv(arg1, arg2);
     case SYS_DF: return sys_df(arg1);
+    case SYS_BCACHE_PROBE: return sys_bcache_probe(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);
