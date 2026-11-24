@@ -132,6 +132,7 @@ void sched_init(void)
     tasks[0].state = TASK_RUNNING;
     tasks[0].pid   = next_pid++;
     tasks[0].name  = "idle";
+    fd_init_std(tasks[0].fds);
     tasks[0].cr3   = vmm_current_cr3();
     task_count     = 1;
     current        = 0;
@@ -152,6 +153,7 @@ uint32_t task_create(const char *name, void (*func)(void))
     for (uint32_t i = 0; i < TASK_STACK_SIZE; i++)
         t->stack[i] = 0;
 
+    fd_init_std(t->fds);
     t->state = TASK_READY;
     t->pid   = next_pid++;
     t->name  = name;
@@ -469,6 +471,7 @@ uint32_t user_task_create(const char *name, uint64_t cr3,
     for (uint32_t i = 0; i < TASK_STACK_SIZE; i++)
         t->stack[i] = 0;
 
+    fd_init_std(t->fds);
     t->state = TASK_READY;
     t->pid   = next_pid++;
     t->name  = name;

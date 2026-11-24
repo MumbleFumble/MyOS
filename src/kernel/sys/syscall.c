@@ -42,24 +42,43 @@ static void serial_write(const char *buf, uint64_t len)
  * Syscall handlers
  * ----------------------------------------------------------------------- */
 
-/* SYS_WRITE: write(fd, buf, count) */
-static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
+/* -----------------------------------------------------------------------
+ * fd ops (Phase 14 inc.1): every fd dispatches read/write/close
+ * through its per-fd ops table; the handlers below contain no
+ * fd-number special cases. A NULL op means "not supported on
+ * this fd" and the dispatch returns -1, exactly as the old
+ * number-based dispatch did (write to stdin, read from stdout,
+ * closing the console). The op bodies are the old handler
+ * bodies, moved verbatim.
+ * ----------------------------------------------------------------------- */
+
+/* Console stdin: the old sys_read FD_STDIN block, verbatim. */
+static int64_t console_read(struct file *f, uint8_t *buf, uint64_t count)
 {
-    /* File fd (Phase 6 inc.3): route to the VFS write op. */
-    if (fd >= 3 && fd < MAX_FDS) {
-        struct task *t = sched_current_task();
-        struct vfs_node *node = (struct vfs_node *)t->fds[fd].node;
-        if (!node) return -1;
-        int64_t w = vfs_write(node, t->fds[fd].offset, count,
-                              (uint8_t *)buf);
-        if (w > 0) t->fds[fd].offset += (uint64_t)w;
-        return w;
+    (void)f;
+    char *dst = (char *)buf;
+    uint64_t n = 0;
+    dst[n++] = keyboard_getchar_wait();
+    if (dst[n - 1] == '\n' || dst[n - 1] == '\r') {
+        dst[n - 1] = '\n';
+        return (int64_t)n;
     }
-    if (fd != FD_STDOUT && fd != FD_STDERR)
-        return -1;
+    while (n < count) {
+        char c = keyboard_getchar();
+        if (!c) break;
+        dst[n++] = c;
+        if (c == '\n' || c == '\r') { dst[n - 1] = '\n'; break; }
+    }
+    return (int64_t)n;
+}
+
+/* Console stdout/stderr: the old sys_write console block. */
+static int64_t console_write(struct file *f, const uint8_t *buf,
+                             uint64_t count)
+{
+    (void)f;
     if (count == 0)
         return 0;
-
     const char *s = (const char *)buf;
     /* Write to VGA screen and mirror to serial */
     vga_write(s, count);
@@ -67,40 +86,76 @@ static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
     return (int64_t)count;
 }
 
+/* File fds: the old sys_read/sys_write file branches, with the
+ * offset owned by the fd slot. */
+static int64_t file_read(struct file *f, uint8_t *buf, uint64_t count)
+{
+    int64_t r = vfs_read((vfs_node_t *)f->node, f->offset, count, buf);
+    if (r > 0) f->offset += (uint64_t)r;
+    return r;
+}
+
+static int64_t file_write(struct file *f, const uint8_t *buf,
+                          uint64_t count)
+{
+    int64_t w = vfs_write((vfs_node_t *)f->node, f->offset, count,
+                          (uint8_t *)buf);
+    if (w > 0) f->offset += (uint64_t)w;
+    return w;
+}
+
+static int64_t file_close(struct file *f)
+{
+    vfs_close((vfs_node_t *)f->node);
+    return 0;
+}
+
+static const struct fd_ops console_in_ops = {
+    .read = console_read, .write = 0, .close = 0
+};
+static const struct fd_ops console_out_ops = {
+    .read = 0, .write = console_write, .close = 0
+};
+static const struct fd_ops file_ops = {
+    .read = file_read, .write = file_write, .close = file_close
+};
+
+/* fd.h: zero all slots, install the console ops on 0/1/2. */
+void fd_init_std(struct file *fds)
+{
+    for (int i = 0; i < MAX_FDS; i++) {
+        fds[i].node   = 0;
+        fds[i].ops    = 0;
+        fds[i].offset = 0;
+    }
+    fds[0].ops = &console_in_ops;
+    fds[1].ops = &console_out_ops;
+    fds[2].ops = &console_out_ops;
+}
+
+/* The one place the free-slot test lives: ops == NULL. */
+static struct file *fd_get(uint64_t fd)
+{
+    if (fd >= MAX_FDS) return 0;
+    struct file *f = &sched_current_task()->fds[fd];
+    return f->ops ? f : 0;
+}
+
+/* SYS_WRITE: write(fd, buf, count) */
+static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
+{
+    struct file *f = fd_get(fd);
+    if (!f || !f->ops->write) return -1;
+    return f->ops->write(f, (const uint8_t *)buf, count);
+}
+
 /* SYS_READ: read(fd, buf, count) */
 static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count)
 {
     if (count == 0) return 0;
-
-    /* stdin: keyboard */
-    if (fd == FD_STDIN) {
-        char *dst = (char *)buf;
-        uint64_t n = 0;
-        dst[n++] = keyboard_getchar_wait();
-        if (dst[n - 1] == '\n' || dst[n - 1] == '\r') {
-            dst[n - 1] = '\n';
-            return (int64_t)n;
-        }
-        while (n < count) {
-            char c = keyboard_getchar();
-            if (!c) break;
-            dst[n++] = c;
-            if (c == '\n' || c == '\r') { dst[n - 1] = '\n'; break; }
-        }
-        return (int64_t)n;
-    }
-
-    /* file fd */
-    if (fd >= 3 && fd < MAX_FDS) {
-        struct task *t = sched_current_task();
-        struct vfs_node *node = (struct vfs_node *)t->fds[fd].node;
-        if (!node) return -1;
-        int64_t r = vfs_read(node, t->fds[fd].offset, count, (uint8_t *)buf);
-        if (r > 0) t->fds[fd].offset += (uint64_t)r;
-        return r;
-    }
-
-    return -1;
+    struct file *f = fd_get(fd);
+    if (!f || !f->ops->read) return -1;
+    return f->ops->read(f, (uint8_t *)buf, count);
 }
 
 /* SYS_EXIT: exit(status) */
@@ -203,9 +258,11 @@ static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
 
 static int64_t fd_alloc(struct task *t, vfs_node_t *node)
 {
+    if (!node) return -1;
     for (int fd = 3; fd < MAX_FDS; fd++) {
-        if (t->fds[fd].node == 0) {
+        if (t->fds[fd].ops == 0) {
             t->fds[fd].node   = node;
+            t->fds[fd].ops    = &file_ops;
             t->fds[fd].offset = 0;
             return (int64_t)fd;
         }
@@ -233,17 +290,23 @@ static int64_t sys_fcreate(uint64_t path_va)
     return fd_alloc(sched_current_task(), node);
 }
 
-/* SYS_CLOSE: close(fd) -> 0 or -1 */
+/* SYS_CLOSE: close(fd) -> 0 or -1. Dispatches through the
+ * fd's ops like read/write; the console's NULL close makes
+ * closing fds 0/1/2 fail exactly as the old fd<3 check did.
+ * The slot is cleared only when the backend close succeeds. */
 static int64_t sys_close(uint64_t fd_u)
 {
     int fd = (int)fd_u;
-    if (fd < 3 || fd >= MAX_FDS) return -1;
-    struct task *t = sched_current_task();
-    if (!t->fds[fd].node) return -1;
-    vfs_close((vfs_node_t *)t->fds[fd].node);
-    t->fds[fd].node   = 0;
-    t->fds[fd].offset = 0;
-    return 0;
+    if (fd < 0 || fd >= MAX_FDS) return -1;
+    struct file *f = fd_get((uint64_t)fd);
+    if (!f || !f->ops->close) return -1;
+    int64_t r = f->ops->close(f);
+    if (r == 0) {
+        f->node   = 0;
+        f->ops    = 0;
+        f->offset = 0;
+    }
+    return r;
 }
 
 /* SYS_READDIR: readdir(index, name_buf) -> 0 or -1 */

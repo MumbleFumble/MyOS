@@ -11,13 +11,10 @@
 /* Maximum open file descriptors per task. fds 0/1/2 are stdin/stdout/stderr. */
 #define MAX_FDS  16
 
-/* Forward-declared to avoid pulling the full fs/vfs.h into every consumer. */
-struct vfs_node;
-
-struct file {
-    struct vfs_node *node;    /* NULL = closed (or special fd 0/1/2) */
-    uint64_t         offset;  /* byte position for next read */
-};
+/* struct file + struct fd_ops live in fd.h (Phase 14 inc.1):
+ * every fd, console included, dispatches through a per-fd ops
+ * table, and ops == NULL is the free-slot test. */
+#include "fd.h"
 
 typedef enum {
     TASK_READY   = 0,
