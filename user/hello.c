@@ -866,6 +866,7 @@ static const char *parse_err;
 static int         word_toks[256];  /* token index of each stage word */
 static int         nword_toks;
 static int         gt_tok;          /* token index of '>', or -1 */
+static int         gt_stage;        /* stage index holding '>' */
 static int         prompt_nl;       /* set by dispatch_command (inc.5) */
 static long        redir_save;      /* saved console fd slot, or -1 */
 
@@ -923,7 +924,7 @@ static int shell_parse(const char *line)
             }
             stg_argv[na++] = 0; stg_argc[nst++] = argc; argc = 0;
         } else if (tok_kind[k] == TOK_GT) {
-            gt_tok = k;
+            gt_tok = k; gt_stage = nst;
             if (redirect_g) {
                 parse_err = "multiple redirections";
                 return PARSE_ERROR;
@@ -950,31 +951,34 @@ static int shell_parse(const char *line)
     }
     stg_argv[na++] = 0; stg_argc[nst++] = argc;
     nstages_g = nst;
-    return (nst > 1) ? PARSE_UNSUPPORTED : PARSE_OK;
+    return PARSE_OK;
 }
 
-/* Build arg for a redirected single-stage line (Phase 14
- * inc.5). The plain-line feed (raw remainder from the second
- * token) would include the "> target" text, so a redirected
- * arg is the raw line span from the first argument word to
- * the last argument word (word = a word token of the stage;
- * the command word and the redirect target are excluded).
- * If '>' sits between argument words (POSIX placement), the
+/* Build arg for one stage of a redirected or pipelined line
+ * (Phase 14 inc.5, generalised in inc.6). The plain-line feed
+ * (raw remainder from the second token) would include the
+ * "> target" text and other stages, so a stage arg is the
+ * raw line span from the stage's first argument word to its
+ * last (word = a word token of the stage; the command word
+ * and the redirect target are excluded). w0 is the stage's
+ * first word index in word_toks, wargc its word count. If
+ * '>' sits between argument words (POSIX placement), the
  * span is two raw segments joined with one space, the first
  * segment's trailing separators stripped. Inner spacing is
  * raw, so write's free text keeps its double spaces. With
  * no quoting in the lexer, a word's raw end is exactly
  * start + its length. */
-static void build_redirected_arg(const char *line, char *arg)
+static void build_stage_arg(int w0, int wargc, const char *line,
+                            char *arg)
 {
     int ai = 0;
-    if (nword_toks >= 2) {
-        int first = word_toks[1];
-        int last = word_toks[nword_toks - 1];
+    if (wargc >= 2) {
+        int first = word_toks[w0 + 1];
+        int last = word_toks[w0 + wargc - 1];
         int last_end = tok_start[last] + (int)slen_u(tok_ptr[last]);
         int split = -1;
         if (gt_tok > first && gt_tok < last) {
-            for (int wi = 2; wi < nword_toks; wi++) {
+            for (int wi = w0 + 2; wi < w0 + wargc; wi++) {
                 if (word_toks[wi] > gt_tok) { split = word_toks[wi]; break; }
             }
         }
@@ -1008,6 +1012,116 @@ static void redir_restore(void)
 
 static void dispatch_command(const char *cmd, const char *arg,
                              const char *line, long n);
+/* Execute a pipeline (Phase 14 inc.6): N >= 2 stages run
+ * sequentially, stage s's stdout wired to a fresh pipe whose
+ * read end becomes stage s+1's stdin; the last stage writes
+ * to the console, or to the line's redirect target (which
+ * the parser must place in the last stage). Interleaving
+ * the dispatches is impossible — dispatch is a synchronous
+ * call — so the pipe bound applies: only the first 1024
+ * bytes of an intermediate stage's output are retained, and
+ * a producer writing more drops the excess (its writes
+ * return short counts / -2, and no builtin retries writes),
+ * so no stage can hang. EOF arms automatically: a pipe's
+ * write end lives only as fd 1's description once its slot
+ * is closed, and wiring the next stage displaces fd 1,
+ * dropping the last writer reference before the consumer
+ * dispatches. No builtin reads fd 0 today, so intermediate
+ * output is discarded when the ends close; the wiring is
+ * what the test observes (console exactly-once, restore).
+ * fd 0 and fd 1 are saved before stage 0 and restored after
+ * the last stage, on the failure path too. */
+static void run_pipeline(const char *line)
+{
+    /* Pre-checks: nothing has run yet. */
+    int aoff = 0;
+    for (int s = 0; s < nstages_g; s++) {
+        const char *nm = stg_argv[aoff];
+        if (streq(nm, "exec") || streq(nm, "exit") ||
+            streq(nm, "pf")) {
+            puts_u("shell: "); puts_u(nm);
+            puts_u(" not supported in pipelines\r\n> ");
+            return;
+        }
+        aoff += stg_argc[s] + 1;
+    }
+    if (redirect_g && gt_stage != nstages_g - 1) {
+        puts_u("shell: redirection in a pipeline must be on the last stage\r\n> ");
+        return;
+    }
+    long tfd = -1;
+    if (redirect_g) {
+        tfd = sys_fcreate(redirect_g);
+        if (tfd < 0) {
+            puts_u("shell: cannot create "); puts_u(redirect_g);
+            puts_u("\r\n> "); return;
+        }
+    }
+    long sv0 = -1, sv1 = -1;
+    for (long k = 15; k >= 3; k--)
+        if (sys_dup2(k, k) < 0) { sv0 = k; break; }
+    if (sv0 >= 0 && sys_dup2(0, sv0) < 0) sv0 = -1;
+    if (sv0 >= 0) {
+        for (long k = 15; k >= 3; k--)
+            if (sys_dup2(k, k) < 0) { sv1 = k; break; }
+        if (sv1 >= 0 && sys_dup2(1, sv1) < 0) sv1 = -1;
+    }
+    if (sv0 < 0 || sv1 < 0) {
+        if (sv0 >= 0) { sys_dup2(sv0, 0); sys_close(sv0); }
+        if (tfd >= 0) sys_close(tfd);
+        puts_u("shell: pipeline failed\r\n> ");
+        return;
+    }
+
+    long prev_read = -1;
+    int failed = 0;
+    aoff = 0;
+    int woff = 0;
+    for (int s = 0; s < nstages_g; s++) {
+        if (s > 0) {
+            sys_dup2(prev_read, 0);
+            sys_close(prev_read);
+            prev_read = -1;
+        }
+        if (s < nstages_g - 1) {
+            long pfds[2];
+            if (sys_pipe(pfds) < 0) { failed = 1; break; }
+            sys_dup2(pfds[1], 1);
+            sys_close(pfds[1]);
+            prev_read = pfds[0];
+        } else if (tfd >= 0) {
+            sys_dup2(tfd, 1);
+            sys_close(tfd);
+            tfd = -1;
+        } else {
+            sys_dup2(sv1, 1);
+        }
+        char scmd[64], sarg[192];
+        const char *w = stg_argv[aoff];
+        int ci = 0;
+        while (w[ci] && ci < 63) { scmd[ci] = w[ci]; ci++; }
+        scmd[ci] = '\0';
+        build_stage_arg(woff, stg_argc[s], line, sarg);
+        char rline[256];
+        int ri = 0;
+        for (int j = 0; scmd[j] && ri < 250; j++) rline[ri++] = scmd[j];
+        if (sarg[0]) {
+            rline[ri++] = ' ';
+            for (int j = 0; sarg[j] && ri < 250; j++) rline[ri++] = sarg[j];
+        }
+        rline[ri] = '\0';
+        dispatch_command(scmd, sarg, rline, ri);
+        aoff += stg_argc[s] + 1;
+        woff += stg_argc[s];
+    }
+    if (prev_read >= 0) sys_close(prev_read);
+    if (tfd >= 0) sys_close(tfd);
+    sys_dup2(sv0, 0); sys_close(sv0);
+    sys_dup2(sv1, 1); sys_close(sv1);
+    if (failed) { puts_u("shell: pipeline failed\r\n> "); return; }
+    puts_u(redirect_g ? "> " : (prompt_nl ? "\r\n> " : "> "));
+}
+
 
 void _start(long argc, char **argv)
 {
@@ -1038,10 +1152,7 @@ void _start(long argc, char **argv)
             puts_u("shell: parse error: "); puts_u(parse_err);
             puts_u("\r\n> "); continue;
         }
-        if (pr == PARSE_UNSUPPORTED) {
-            puts_u("shell: pipelines not yet supported\r\n> ");
-            continue;
-        }
+
         char cmd[64], arg[192];
         {
             const char *w = stg_argv[0];
@@ -1049,7 +1160,7 @@ void _start(long argc, char **argv)
             while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
             cmd[ci] = '\0';
             if (redirect_g) {
-                build_redirected_arg(line, arg);
+                build_stage_arg(0, stg_argc[0], line, arg);
             } else {
                 const char *a = (ntok_g > 1) ? line + tok_start[1]
                                              : line + n;
@@ -1059,6 +1170,7 @@ void _start(long argc, char **argv)
             }
         }
 
+        if (nstages_g > 1) { run_pipeline(line); continue; }
         if (redirect_g) {
             if (streq(cmd, "exec")) {
                 puts_u("shell: redirection not supported for exec\r\n> ");
