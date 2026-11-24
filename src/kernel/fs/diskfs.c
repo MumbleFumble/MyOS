@@ -2,6 +2,7 @@
 #include "diskfs.h"
 #include "../fs/myfs.h"
 #include "../drivers/ata.h"
+#include "../arch/port_io.h"
 #include "bcache.h"
 #include "../mem/kheap.h"
 
@@ -26,6 +27,26 @@ static int            disk_mounted = 0;
 static uint32_t disk_append_lba   = 0;
 static uint32_t disk_record_count = 0;  /* records on disk (superblock) */
 static uint32_t disk_append_limit = 0;
+
+/* fsck's SIZE_WRAP_LIMIT (scripts/fsck_myfs.py): a record size
+ * above this wraps the uint32 record-sector arithmetic the
+ * mount walk and fsck share. */
+#define DISKFS_SIZE_WRAP_LIMIT (0xFFFFFFFFu - 591)
+
+/* ---- tiny serial logger (COM1), same idiom as net.c ---- */
+static void dputc(char c)
+{
+    while (!(inb(0x3FD) & 0x20)) { }
+    outb(0x3F8, (uint8_t)c);
+}
+static void dputs(const char *str) { while (*str) dputc(*str++); }
+static void dputu(uint32_t v)
+{
+    char b[12]; int i = 0;
+    if (!v) { dputc('0'); return; }
+    while (v) { b[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i) dputc(b[--i]);
+}
 
 static int diskfs_name_eq(const char *a, const char *b)
 {
@@ -201,6 +222,7 @@ static int diskfs_rollback_tail(uint32_t start, uint32_t sects)
     disk_append_lba   = start;
     disk_record_count--;
     if (diskfs_write_super() != 0) return -1;
+    if (bcache_sync() != 0) return -1;   /* Phase 13 inc.7: publish durably here, not at some later op's sync */
     return 1;
 }
 
@@ -241,9 +263,21 @@ static int64_t diskfs_append_record(const char *name,
             }
         }
     }
+    /* Phase 13 inc.7: ordered publish. Flush the record's
+     * sectors BEFORE the superblock write that publishes them:
+     * bcache_sync flushes in cache-slot order, so without this
+     * first sync the superblock could reach the disk ahead of
+     * a record sector and the count would claim a record whose
+     * bytes are not durable. A crash before the first sync
+     * leaves a valid log with at most a partial record past
+     * its end; a crash before the second leaves the old count
+     * (append lost, log valid) or the new one (the record is
+     * already durable). */
+    if (bcache_sync() != 0) return -1;
     disk_append_lba += sects;
     disk_record_count++;
     if (diskfs_write_super() != 0) return -1;
+    if (bcache_sync() != 0) return -1;
     return (int64_t)start;
 }
 
@@ -333,10 +367,55 @@ int diskfs_mount(void)
     uint8_t  hdr_buf[512];
 
     for (uint32_t i = 0; i < count; i++) {
-        if (disk_append_limit && cur_lba >= disk_append_limit) break;
-        if (ata_read(cur_lba, 1, hdr_buf) != 0) break;
+        if (disk_append_limit && cur_lba >= disk_append_limit) {
+            dputs("[diskfs] mount: file_count runs past the append limit at record ");
+            dputu(i); dputs(" of "); dputu(count);
+            dputs(", mount failed\r\n");
+            return -1;
+        }
+        if (ata_read(cur_lba, 1, hdr_buf) != 0) {
+            dputs("[diskfs] mount: read error at record ");
+            dputu(i); dputs(", mount failed\r\n");
+            return -1;
+        }
         myfs_file_hdr_t *fh = (myfs_file_hdr_t *)hdr_buf;
         uint32_t record_sects = (80 + (uint32_t)fh->size + 511) / 512;
+
+        /* Phase 13 inc.7: validate the header exactly as the
+         * host fsck (scripts/fsck_myfs.py) does, BEFORE folding
+         * it: NUL-terminated non-empty name, flag byte exactly
+         * 0x00 or MYFS_FLAG_DELETED, a size that cannot wrap
+         * the sector arithmetic, and an extent that tiles
+         * inside the append limit. */
+        int name_ok = 0;
+        for (int j = 0; j < MYFS_NAME_MAX; j++)
+            if (fh->name[j] == 0) { name_ok = (j > 0); break; }
+        int valid = name_ok
+            && (fh->_pad[0] == 0x00 || fh->_pad[0] == MYFS_FLAG_DELETED)
+            && fh->size <= DISKFS_SIZE_WRAP_LIMIT
+            && (!disk_append_limit
+                || cur_lba + record_sects <= disk_append_limit);
+        if (!valid) {
+            if (i == count - 1) {
+                /* Torn tail: the only damage is the last
+                 * record, the one a crashed append was
+                 * publishing. Truncate the log to the valid
+                 * prefix and persist the repaired
+                 * superblock; the table already holds
+                 * exactly those records. */
+                disk_record_count = i;
+                if (diskfs_write_super() != 0 || bcache_sync() != 0)
+                    return -1;
+                dputs("[diskfs] mount: torn tail at record ");
+                dputu(i); dputs(" of "); dputu(count);
+                dputs(", log truncated and superblock repaired\r\n");
+                break;
+            }
+            dputs("[diskfs] mount: record ");
+            dputu(i); dputs(" of "); dputu(count);
+            dputs(" is corrupt (not a torn tail), mount failed\r\n");
+            return -1;
+        }
 
         if (fh->_pad[0] & MYFS_FLAG_DELETED) {
             int idx = diskfs_find(fh->name);
