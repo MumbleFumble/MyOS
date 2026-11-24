@@ -283,6 +283,13 @@ sys_bcache_probe:
     int  0x80
     ret
 
+/* long sys_dup2(long oldfd, long newfd) */
+.global sys_dup2
+sys_dup2:
+    mov  rax, 43        /* SYS_DUP2 */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

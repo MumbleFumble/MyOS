@@ -120,25 +120,106 @@ static const struct fd_ops file_ops = {
     .read = file_read, .write = file_write, .close = file_close
 };
 
-/* fd.h: zero all slots, install the console ops on 0/1/2. */
-void fd_init_std(struct file *fds)
+/* -----------------------------------------------------------------------
+ * Shared descriptions (Phase 14 inc.2). Slots hold pointers;
+ * NULL is the free-slot test. File descriptions come from a
+ * fixed pool sized MAX_TASKS * MAX_FDS, so exhaustion is
+ * unreachable while tasks are never recycled (the -1 paths
+ * stay for when that changes); refcount 0 marks a free pool
+ * entry. The console descriptions are static shared objects:
+ * their ops never touch node/offset, so every task may point
+ * at the same ones. Refcount/pool mutations run with IRQs
+ * off (syscalls here are preemptible: the 0x80 gate is a
+ * trap gate); backend closes always run with IRQs on.
+ * ----------------------------------------------------------------------- */
+#define FD_DESC_POOL (MAX_TASKS * MAX_FDS)
+static struct file desc_pool[FD_DESC_POOL];
+
+static struct file console_in_desc = {
+    .node = 0, .ops = &console_in_ops, .offset = 0,
+    .refcount = 0, .flags = FILE_STATIC
+};
+static struct file console_out_desc = {
+    .node = 0, .ops = &console_out_ops, .offset = 0,
+    .refcount = 0, .flags = FILE_STATIC
+};
+
+static uint64_t fd_cli_save(void)
 {
-    for (int i = 0; i < MAX_FDS; i++) {
-        fds[i].node   = 0;
-        fds[i].ops    = 0;
-        fds[i].offset = 0;
-    }
-    fds[0].ops = &console_in_ops;
-    fds[1].ops = &console_out_ops;
-    fds[2].ops = &console_out_ops;
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("cli");
+    return rflags;
+}
+static void fd_restore(uint64_t rflags)
+{
+    if (rflags & 0x200) __asm__ volatile("sti");
 }
 
-/* The one place the free-slot test lives: ops == NULL. */
+static void fd_fatal(const char *msg)
+{
+    serial_write("fd: FATAL: ", 11);
+    uint64_t n = 0; while (msg[n]) n++;
+    serial_write(msg, n);
+    serial_write("\r\n", 2);
+    for (;;) __asm__ volatile("hlt");
+    __builtin_unreachable();
+}
+
+static void desc_get(struct file *f)
+{
+    if (f->flags & FILE_STATIC) return;
+    uint64_t fl = fd_cli_save();
+    if (f->refcount <= 0) { fd_restore(fl); fd_fatal("desc_get: dead desc"); }
+    f->refcount++;
+    fd_restore(fl);
+}
+
+static void desc_put(struct file *f)
+{
+    if (f->flags & FILE_STATIC) return;
+    uint64_t fl = fd_cli_save();
+    if (f->refcount <= 0) { fd_restore(fl); fd_fatal("desc_put: dead desc"); }
+    if (f->refcount > 1) { f->refcount--; fd_restore(fl); return; }
+    fd_restore(fl);
+    /* Last reference: the entry stays reserved (refcount still
+     * 1, and no slot points at it) while the backend close runs
+     * with IRQs on; it returns to the pool only afterwards. */
+    if (f->ops && f->ops->close) f->ops->close(f);
+    fl = fd_cli_save();
+    f->node = 0; f->ops = 0; f->offset = 0; f->flags = 0;
+    f->refcount = 0;
+    fd_restore(fl);
+}
+
+/* Drop the reference held by slot fd of task t (if any) and
+ * clear the slot, including its pin. Backend close happens
+ * inside desc_put when the last alias goes away. */
+static void fd_release(struct task *t, int fd)
+{
+    struct file *f = t->fds[fd];
+    t->fds[fd] = 0;
+    t->fd_pinned &= (uint16_t)~(1u << fd);
+    if (f) desc_put(f);
+}
+
+/* fd.h: all slots free except the pinned console fds 0/1/2. */
+void fd_init_std(struct task *t)
+{
+    for (int i = 0; i < MAX_FDS; i++) t->fds[i] = 0;
+    t->fds[0] = &console_in_desc;
+    t->fds[1] = &console_out_desc;
+    t->fds[2] = &console_out_desc;
+    t->fd_pinned = 0x7;
+}
+
+/* The one place the free-slot test lives: slot == NULL. */
 static struct file *fd_get(uint64_t fd)
 {
     if (fd >= MAX_FDS) return 0;
-    struct file *f = &sched_current_task()->fds[fd];
-    return f->ops ? f : 0;
+    struct file *f = sched_current_task()->fds[fd];
+    if (f && !f->ops) fd_fatal("fd_get: dead desc in slot");
+    return f;
 }
 
 /* SYS_WRITE: write(fd, buf, count) */
@@ -259,16 +340,30 @@ static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
 static int64_t fd_alloc(struct task *t, vfs_node_t *node)
 {
     if (!node) return -1;
+    /* Slot first (per-task state), then a pool description;
+     * the pointer is published last, fully initialised. */
+    int slot = -1;
     for (int fd = 3; fd < MAX_FDS; fd++) {
-        if (t->fds[fd].ops == 0) {
-            t->fds[fd].node   = node;
-            t->fds[fd].ops    = &file_ops;
-            t->fds[fd].offset = 0;
-            return (int64_t)fd;
-        }
+        if (!t->fds[fd]) { slot = fd; break; }
     }
-    vfs_close(node);   /* no free slot */
-    return -1;
+    if (slot < 0) { vfs_close(node); return -1; }   /* table full */
+
+    uint64_t fl = fd_cli_save();
+    struct file *f = 0;
+    for (int i = 0; i < FD_DESC_POOL; i++) {
+        if (desc_pool[i].refcount == 0) { f = &desc_pool[i]; break; }
+    }
+    if (f) {
+        f->node     = node;
+        f->ops      = &file_ops;
+        f->offset   = 0;
+        f->flags    = 0;
+        f->refcount = 1;
+        t->fds[slot] = f;
+    }
+    fd_restore(fl);
+    if (!f) { vfs_close(node); return -1; }         /* pool empty */
+    return (int64_t)slot;
 }
 
 /* SYS_OPEN: open(path) -> fd, or -1 on not-found / table full */
@@ -290,23 +385,39 @@ static int64_t sys_fcreate(uint64_t path_va)
     return fd_alloc(sched_current_task(), node);
 }
 
-/* SYS_CLOSE: close(fd) -> 0 or -1. Dispatches through the
- * fd's ops like read/write; the console's NULL close makes
- * closing fds 0/1/2 fail exactly as the old fd<3 check did.
- * The slot is cleared only when the backend close succeeds. */
+/* SYS_CLOSE: close(fd) -> 0 or -1. Refuses pinned slots
+ * (the fresh console fds 0/1/2, as closing them has always
+ * failed) and free slots; anything else is released through
+ * fd_release, so the backend close runs only when the last
+ * alias closes. A console ALIAS (an unpinned slot pointing
+ * at a console description) closes fine: it just unlinks. */
 static int64_t sys_close(uint64_t fd_u)
 {
     int fd = (int)fd_u;
     if (fd < 0 || fd >= MAX_FDS) return -1;
-    struct file *f = fd_get((uint64_t)fd);
-    if (!f || !f->ops->close) return -1;
-    int64_t r = f->ops->close(f);
-    if (r == 0) {
-        f->node   = 0;
-        f->ops    = 0;
-        f->offset = 0;
-    }
-    return r;
+    struct task *t = sched_current_task();
+    if (!t->fds[fd]) return -1;
+    if (t->fd_pinned & (1u << fd)) return -1;
+    fd_release(t, fd);
+    return 0;
+}
+
+/* SYS_DUP2: dup2(oldfd, newfd) -> newfd or -1 (Phase 14
+ * inc.2). Both slots end up pointing at oldfd's description:
+ * one offset, backend close at the last release. A displaced
+ * newfd is released first (bypassing the pin, which is what
+ * makes dup2 over fd 1 usable for redirection). */
+static int64_t sys_dup2(uint64_t oldfd, uint64_t newfd)
+{
+    if (oldfd >= MAX_FDS || newfd >= MAX_FDS) return -1;
+    struct task *t = sched_current_task();
+    struct file *f = t->fds[oldfd];
+    if (!f) return -1;
+    if (oldfd == newfd) return (int64_t)newfd;
+    desc_get(f);                 /* the new alias's ref first */
+    fd_release(t, (int)newfd);   /* then displace the old one */
+    t->fds[newfd] = f;
+    return (int64_t)newfd;
 }
 
 /* SYS_READDIR: readdir(index, name_buf) -> 0 or -1 */
@@ -914,6 +1025,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_TCPSRV_RECV: return sys_tcpsrv_recv(arg1, arg2);
     case SYS_DF: return sys_df(arg1);
     case SYS_BCACHE_PROBE: return sys_bcache_probe(arg1);
+    case SYS_DUP2:    return sys_dup2(arg1, arg2);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

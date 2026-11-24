@@ -56,8 +56,11 @@ struct task {
     uint32_t      parent_pid;   /* pid of task that spawned this one, 0 = none */
     int32_t       exit_code;    /* exit status, valid when state == TASK_DEAD */
     uint32_t      wait_pid;     /* pid we are waiting on (0 = any child), TASK_WAITING only */
-    /* Open file descriptor table */
-    struct file   fds[MAX_FDS];
+    /* Open file descriptor table: slots point at shared
+     * descriptions (fd.h); NULL = free. fd_pinned bit i set
+     * means close() on fd i fails (the fresh console fds). */
+    struct file  *fds[MAX_FDS];
+    uint16_t      fd_pinned;
     /* ---- Telemetry (written by scheduler, read by SYS_TELEMETRY) ---- */
     uint64_t      total_ticks;          /* cumulative ticks this task has run */
     uint64_t      last_scheduled_tick;  /* tick when this task was last made RUNNING */

@@ -2,24 +2,31 @@
 #include <stdint.h>
 
 /* -----------------------------------------------------------------------
- * Per-fd operations table (Phase 14 inc.1).
+ * Per-fd operations table + shared open-file descriptions
+ * (Phase 14 inc.1 vtable; inc.2 shared descriptions for dup2).
  *
- * Every open fd — console included — dispatches read/write/close
- * through its ops table; the syscall handlers no longer special-case
- * fd numbers. A NULL op pointer means "not supported on this fd"
- * and the dispatch returns -1, which reproduces the pre-vtable
- * behaviour exactly (write to stdin, read from stdout, closing the
- * console). A NULL ops pointer in a slot means the slot is free:
- * that is the single free-slot test everywhere.
+ * A task's fd table holds POINTERS to struct file descriptions.
+ * A NULL slot is a free fd — the single free-slot test. Several
+ * slots (in one task, via dup2) may point at the SAME description:
+ * they share its offset, and the description's backend close
+ * runs exactly once, when the last alias is released.
  *
- * struct file is embedded per-slot in struct task (sched.h). The
- * ops receive the slot itself, so the backend's handle (node) and
- * the offset live next to the dispatch pointer; a future dup2/pipes
- * step can point two slots at shared state without changing these
- * signatures.
+ * read/write/close dispatch through the description's ops table.
+ * A NULL op pointer means "no backend operation" (the console
+ * has no close); whether close() on a slot is allowed at all is
+ * a per-slot property (the fd_pinned mask in struct task), not
+ * a property of the description.
+ *
+ * refcount: pool descriptions (file fds) count their aliases;
+ * 0 marks a free pool entry. Console descriptions are static
+ * shared objects flagged FILE_STATIC: they are never counted,
+ * never closed, never freed.
  * ----------------------------------------------------------------------- */
 struct vfs_node;
 struct file;
+struct task;
+
+#define FILE_STATIC 0x1u   /* static shared description (console) */
 
 struct fd_ops {
     int64_t (*read)(struct file *f, uint8_t *buf, uint64_t count);
@@ -28,12 +35,16 @@ struct fd_ops {
 };
 
 struct file {
-    struct vfs_node     *node;   /* backing node (file fds); NULL for console */
-    const struct fd_ops *ops;    /* NULL = free slot */
-    uint64_t             offset; /* byte position for the next read/write */
+    struct vfs_node     *node;     /* backing node (file fds); NULL for console */
+    const struct fd_ops *ops;      /* dispatch table; NULL only on a free pool entry */
+    uint64_t             offset;   /* byte position, shared by all aliases */
+    int32_t              refcount; /* aliases; pool entries: 0 = free */
+    uint32_t             flags;    /* FILE_STATIC for the console descriptions */
 };
 
-/* Zero all slots and install the console ops on fds 0/1/2.
- * Defined in syscall.c, where the console ops live. Called from
- * every task-creation path before the task can run. */
-void fd_init_std(struct file *fds);
+/* Initialise a task's fd table: all slots free except fds
+ * 0/1/2, which point at the shared console descriptions and
+ * are pinned (close() on them fails, as it always has).
+ * Defined in syscall.c. Called from every task-creation path
+ * before the task can run. */
+void fd_init_std(struct task *t);
