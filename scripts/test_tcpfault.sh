@@ -94,5 +94,24 @@ run_profile drop-first-data "FAULT drop-first-data" "GUEST RETRANSMIT"
 run_profile drop-first-ack  "FAULT drop-first-ack"  "GUEST RETRANSMIT"
 run_profile delay-echo      "FAULT delay-echo"      "GUEST RETRANSMIT"
 run_profile ooo             "FAULT ooo"             "GUEST DUP-ACK"
+run_profile drop-first-two-data "FAULT drop-first-two-data" "BACKOFF gap1="
 
-echo "[test] PASS: all four fault profiles injected deterministically and the current stack's behaviour under each is as characterised"
+# Backoff inequality (Phase 15 inc.2): the second retransmit gap
+# must be at least 1.8x the first, from the peer's timestamps,
+# AND the absolute gaps must sit at the computed RTO (20-tick
+# floor = 200 ms, doubled to 400 ms) — a run where no RTT sample
+# was ever taken would keep the old 100-tick initial RTO and
+# produce ~1 s / ~2 s gaps at the same 2.0 ratio.
+python3 - << 'EOF' || { echo "[test] FAIL: backoff inequality not satisfied"; exit 1; }
+import re
+log = open("/tmp/myos_tcpfault_drop-first-two-data_peer.log").read()
+m = re.search(r"BACKOFF gap1=([\d.]+)s gap2=([\d.]+)s ratio=([\d.]+)", log)
+assert m, "BACKOFF line missing"
+g1, g2, ratio = float(m.group(1)), float(m.group(2)), float(m.group(3))
+print(f"[test] backoff evidence: gap1={g1:.3f}s gap2={g2:.3f}s ratio={ratio:.2f}")
+assert ratio >= 1.8, f"ratio {ratio:.2f} < 1.8"
+assert 0.150 <= g1 <= 0.280, f"gap1 {g1:.3f}s not at the 200 ms floored RTO"
+assert 0.340 <= g2 <= 0.560, f"gap2 {g2:.3f}s not at the doubled 400 ms RTO"
+EOF
+
+echo "[test] PASS: all fault profiles injected deterministically and the current stack's behaviour under each is as characterised"

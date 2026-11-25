@@ -802,7 +802,20 @@ struct tcp_conn {
     uint32_t fin_seq;
     int fin_queued, peer_fin, error;
     int is_server;   /* slot belongs to the passive (listen) side */
-    uint32_t last_send;
+    /* Retransmission timing (Phase 15 inc.2): Jacobson/Karels
+     * estimator in ticks (x1024 fixed point), the effective RTO
+     * with backoff applied, and per-item send clocks. tx_time /
+     * tx_rexmit track the SYN-or-data item (never simultaneously
+     * outstanding); the FIN has its own clock (fin_time) and is
+     * never sampled, so it needs no flag. Send clocks are set
+     * ONLY when their item is (re)transmitted, never by ACK
+     * sends. */
+    int32_t srtt_fp, rttvar_fp;
+    int have_rtt;
+    uint32_t rto_base, rto;
+    uint32_t tx_time;
+    int tx_rexmit;
+    uint32_t fin_time;
 };
 static struct tcp_conn tcp_conns[TCP_MAX_CONN];
 /* The client connection in use by SYS_TCPECHO, or NULL. Slots in
@@ -865,7 +878,87 @@ static void tcp_send_seg(struct tcp_conn *c, uint8_t flags,
 {
     tcp_send_raw(c->peer_mac, c->peer_ip, c->local_port, c->peer_port,
                  c->snd_nxt, c->rcv_nxt, flags, data, dlen);
-    c->last_send = (uint32_t)timer_ticks();
+}
+
+/* ---- Retransmission timing (Phase 15 inc.2) ----
+ * Jacobson/Karels RTO estimation replacing the fixed 100-tick
+ * threshold. Bounds, in ticks (PIT is 100 Hz): the initial RTO
+ * before any sample is 100 (1 s), so handshake behaviour is
+ * unchanged until measured; RTO_MIN is 20 (200 ms — the
+ * retransmit drivers run on 10-tick syscall wait slices, so a
+ * floor of two slices keeps the first backoff doubling visible
+ * on the wire; it is also Linux's RTO_MIN precedent, and a
+ * deliberate deviation from RFC 6298's 1 s SHOULD, stated in
+ * the inc.2 report); RTO_MAX is 6000 (60 s, the RFC 6298 cap
+ * shape, beyond every syscall wait bound here). */
+#define TCP_RTO_INIT 100
+#define TCP_RTO_MIN 20
+#define TCP_RTO_MAX 6000
+#define RTT_SHIFT 10
+
+static uint32_t tcp_rto(const struct tcp_conn *c)
+{
+    return c->rto;
+}
+
+static void tcp_rtt_init(struct tcp_conn *c)
+{
+    c->srtt_fp = 0;
+    c->rttvar_fp = 0;
+    c->have_rtt = 0;
+    c->rto_base = TCP_RTO_INIT;
+    c->rto = TCP_RTO_INIT;
+    c->tx_rexmit = 0;
+}
+
+/* One Karn-valid RTT sample (the measured segment was sent
+ * exactly once). Updates the estimator and collapses any
+ * backoff: this is the ONLY place rto returns to rto_base
+ * (RFC 6298 section 5 — resetting backoff on any ACK advance
+ * would pin the RTO at a stale base whenever the true RTT
+ * exceeds it, because every ACK would then cover a
+ * retransmitted segment and no sample could ever land).
+ * Fixed-point form reviewed with Claude: err computed once
+ * from the old SRTT, R clamped before shifting, RTO rounded
+ * up, granularity term max(1 tick, 4*RTTVAR). */
+static void tcp_rtt_sample(struct tcp_conn *c, uint32_t r)
+{
+    if (r == 0)
+        r = 1;   /* sub-tick RTT: the 10 ms clock cannot resolve it */
+    if (r > TCP_RTO_MAX)
+        r = TCP_RTO_MAX;
+    int32_t r_fp = (int32_t)(r << RTT_SHIFT);
+    if (!c->have_rtt) {
+        c->srtt_fp = r_fp;
+        c->rttvar_fp = r_fp / 2;
+        c->have_rtt = 1;
+    } else {
+        int32_t err = r_fp - c->srtt_fp;
+        int32_t aerr = err < 0 ? -err : err;
+        c->rttvar_fp += (aerr - c->rttvar_fp) / 4;
+        c->srtt_fp += err / 8;
+    }
+    int32_t var4 = 4 * c->rttvar_fp;
+    if (var4 < (1 << RTT_SHIFT))
+        var4 = 1 << RTT_SHIFT;
+    uint32_t rto = (uint32_t)((c->srtt_fp + var4
+                               + (1 << RTT_SHIFT) - 1) >> RTT_SHIFT);
+    if (rto < TCP_RTO_MIN)
+        rto = TCP_RTO_MIN;
+    if (rto > TCP_RTO_MAX)
+        rto = TCP_RTO_MAX;
+    c->rto_base = rto;
+    c->rto = rto;
+}
+
+/* Exponential backoff: a timer-driven retransmit doubles the
+ * effective RTO (capped). The caller stamps the item's clock
+ * and rexmit flag. */
+static void tcp_backoff(struct tcp_conn *c)
+{
+    c->rto = c->rto * 2;
+    if (c->rto > TCP_RTO_MAX)
+        c->rto = TCP_RTO_MAX;
 }
 
 /* Unpredictable ISNs (Phase 13 inc.4, review-009; RFC 6528
@@ -973,8 +1066,10 @@ int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
     c->peer_fin = 0;
     c->error = 0;
     c->is_server = 0;
+    tcp_rtt_init(c);
     c->state = TCP_SYN_SENT;
     tcp_send_seg(c, TCP_F_SYN, 0, 0);
+    c->tx_time = (uint32_t)timer_ticks();
     c->snd_nxt++;   /* SYN consumes a sequence number */
     return 0;
 }
@@ -1021,6 +1116,8 @@ static void tcp_conn_queue_tx(struct tcp_conn *c, const uint8_t *data,
     c->tx_seq = c->snd_nxt;
     c->tx_len = len;
     tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, data, len);
+    c->tx_time = (uint32_t)timer_ticks();
+    c->tx_rexmit = 0;
     c->snd_nxt += len;
 }
 
@@ -1058,6 +1155,7 @@ static void tcp_close_conn(struct tcp_conn *c)
         c->fin_seq = c->snd_nxt;
         c->fin_queued = 1;
         tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
+        c->fin_time = (uint32_t)timer_ticks();
         c->snd_nxt++;
         c->state = (c->state == TCP_CLOSE_WAIT) ? TCP_LAST_ACK : TCP_FIN_WAIT;
     }
@@ -1084,31 +1182,46 @@ void net_tcp_close(void)
         tcp_close_conn(tcp_cur);
 }
 
-/* Retransmit whatever is unacked if it has been out for ~1 s.
- * Called from the blocking syscall's wait loop. */
+/* Retransmit whatever is unacked once its item clock reaches
+ * the connection's computed RTO (Phase 15 inc.2). Called from
+ * the blocking syscall's wait loop. Each resend restamps the
+ * item's clock, marks it retransmitted (Karn: its ACK can no
+ * longer be sampled) and doubles the effective RTO. */
 static void tcp_conn_retransmit(struct tcp_conn *c)
 {
     if (!c)
         return;
     uint32_t now = (uint32_t)timer_ticks();
-    if (now - c->last_send < 100)
-        return;
     if (c->state == TCP_SYN_SENT) {
+        if (now - c->tx_time < tcp_rto(c))
+            return;
         c->snd_nxt--;
         tcp_send_seg(c, TCP_F_SYN, 0, 0);
         c->snd_nxt++;
+        c->tx_time = now;
+        c->tx_rexmit = 1;
+        tcp_backoff(c);
     } else if (c->tx_len > 0 && c->snd_una < c->tx_seq + c->tx_len) {
+        if (now - c->tx_time < tcp_rto(c))
+            return;
         uint32_t off = c->snd_una - c->tx_seq;
         uint32_t n = c->tx_len - off;
         uint32_t save = c->snd_nxt;
         c->snd_nxt = c->snd_una;
         tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, c->tx + off, n);
         c->snd_nxt = save;
+        c->tx_time = now;
+        c->tx_rexmit = 1;
+        tcp_backoff(c);
     } else if (c->fin_queued && c->snd_una <= c->fin_seq) {
+        if (now - c->fin_time < tcp_rto(c))
+            return;
         uint32_t save = c->snd_nxt;
         c->snd_nxt = c->fin_seq;
         tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
         c->snd_nxt = save;
+        c->fin_time = now;
+        tcp_backoff(c);
     }
 }
 
@@ -1247,12 +1360,15 @@ void net_tcp_server_tick(void)
         if (!c->is_server || c == tcp_cur)
             continue;
         if (c->state == TCP_SYN_RCVD) {
-            if (now - c->last_send < 100)
+            if (now - c->tx_time < tcp_rto(c))
                 continue;
             uint32_t save = c->snd_nxt;
             c->snd_nxt = c->snd_una;
             tcp_send_seg(c, TCP_F_SYN | TCP_F_ACK, 0, 0);
             c->snd_nxt = save;
+            c->tx_time = now;
+            c->tx_rexmit = 1;
+            tcp_backoff(c);
         } else {
             /* Full data-then-FIN retransmit for the accepted
              * connection (Phase 12 inc.3); a no-op for LISTEN
@@ -1326,8 +1442,10 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
                     ns->peer_fin = 0;
                     ns->error = 0;
                     ns->is_server = 1;
+                    tcp_rtt_init(ns);
                     ns->state = TCP_SYN_RCVD;
                     tcp_send_seg(ns, TCP_F_SYN | TCP_F_ACK, 0, 0);
+                    ns->tx_time = (uint32_t)timer_ticks();
                     ns->snd_nxt++;   /* SYN consumes a sequence number */
                 }
                 return;
@@ -1382,14 +1500,23 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     }
     if (c->state == TCP_SYN_RCVD) {
         if ((flags & TCP_F_SYN) && seq == c->rcv_nxt - 1) {
-            /* Retransmitted SYN: resend the SYN-ACK. */
+            /* Retransmitted SYN: resend the SYN-ACK. The
+             * SYN-ACK has now been sent twice, so its ACK can
+             * never be sampled (Karn); restamp its clock so
+             * the server tick does not fire a second resend
+             * on top of this one. The RTO itself is untouched
+             * (this resend is peer-driven, not timer-driven). */
             uint32_t save = c->snd_nxt;
             c->snd_nxt = c->snd_una;
             tcp_send_seg(c, TCP_F_SYN | TCP_F_ACK, 0, 0);
             c->snd_nxt = save;
+            c->tx_time = (uint32_t)timer_ticks();
+            c->tx_rexmit = 1;
         } else if ((flags & TCP_F_ACK) && ack == c->snd_nxt) {
             c->snd_una = ack;
             c->state = TCP_ESTABLISHED;
+            if (!c->tx_rexmit)
+                tcp_rtt_sample(c, (uint32_t)timer_ticks() - c->tx_time);
         }
         return;
     }
@@ -1399,6 +1526,8 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
             c->snd_una = ack;
             c->rcv_nxt = seq + 1;
             c->state = TCP_ESTABLISHED;
+            if (!c->tx_rexmit)
+                tcp_rtt_sample(c, (uint32_t)timer_ticks() - c->tx_time);
             tcp_send_seg(c, TCP_F_ACK, 0, 0);
         }
         return;
@@ -1406,8 +1535,26 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     /* ACK processing: advance snd_una over data and FIN. */
     if ((flags & TCP_F_ACK) && ack > c->snd_una && ack <= c->snd_nxt) {
         c->snd_una = ack;
-        if (c->tx_len > 0 && ack >= c->tx_seq + c->tx_len)
+        int data_done = 0;
+        if (c->tx_len > 0 && ack >= c->tx_seq + c->tx_len) {
             c->tx_len = 0;
+            data_done = 1;
+        }
+        if (data_done) {
+            if (!c->tx_rexmit)
+                tcp_rtt_sample(c, (uint32_t)timer_ticks() - c->tx_time);
+            if (c->fin_queued)
+                /* The FIN's clock restarts from the ACK of
+                 * the data ahead of it (RFC 6298 5.3 shape),
+                 * so a FIN sent behind unacked data is not
+                 * resent spuriously between split ACKs. */
+                c->fin_time = (uint32_t)timer_ticks();
+        } else if (c->tx_len > 0 && c->tx_rexmit) {
+            /* Partial advance over a retransmitted segment:
+             * no sample can ever be taken from it, so simply
+             * restart its retransmit clock. */
+            c->tx_time = (uint32_t)timer_ticks();
+        }
         if (c->fin_queued && ack > c->fin_seq) {
             c->fin_queued = 0;
             if (c->state == TCP_LAST_ACK)

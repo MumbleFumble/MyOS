@@ -9,6 +9,11 @@ named, deterministic fault profile applied to the data phase:
   drop-first-data  the guest's first data segment is treated as
                    never received (no ACK, no echo); the guest
                    must retransmit to make progress.
+  drop-first-two-data  the first TWO arrivals of the guest's
+                   data segment are dropped the same way, so the
+                   transfer needs two retransmits; the peer logs
+                   the two retransmit gaps (BACKOFF line) so the
+                   test can assert exponential backoff on the wire.
   drop-first-ack   the guest's first data segment is stored but
                    its ACK is withheld (a dropped ACK is wire-
                    identical to one never sent); on the guest's
@@ -128,6 +133,7 @@ def send_tcp(seq, ack, flags, payload=b"", note=""):
 state = "listen"
 data_seq = None        # seq of the guest's data segment
 data_seen = 0          # payload-bearing guest segments received
+data_times = []        # receive time of each data arrival
 stored = None          # guest payload stored by the peer
 echo_due = None        # delay-echo: when the echo may be sent
 echo_sent = False
@@ -199,9 +205,20 @@ def handle(fr):
         elif seq != data_seq:
             fail(f"unexpected data seq {seq}, expected {data_seq}")
         data_seen += 1
+        data_times.append(time.time())
         if data_seen > 1:
             log(f"GUEST RETRANSMIT: data segment seen again "
                 f"(seq={seq}, arrival #{data_seen})")
+        if PROFILE == "drop-first-two-data" and data_seen <= 2:
+            log(f"FAULT drop-first-two-data: guest data segment "
+                f"arrival #{data_seen} (seq={seq} len={len(payload)}) "
+                f"dropped (no ACK, no echo)")
+            return
+        if PROFILE == "drop-first-two-data" and data_seen == 3:
+            g1 = data_times[1] - data_times[0]
+            g2 = data_times[2] - data_times[1]
+            log(f"BACKOFF gap1={g1:.3f}s gap2={g2:.3f}s "
+                f"ratio={g2 / g1:.2f}")
         if PROFILE == "drop-first-data" and data_seen == 1:
             log(f"FAULT drop-first-data: guest data segment #1 "
                 f"(seq={seq} len={len(payload)}) dropped "
