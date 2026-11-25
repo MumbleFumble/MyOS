@@ -869,7 +869,8 @@ static int         gt_tok;          /* token index of '>', or -1 */
 static int         gt_stage;        /* stage index holding '>' */
 static int         prompt_nl;
 static int         stdin_pipe;      /* fd 0 wired to a pipe for this dispatch (inc.7) */
-static long        cat_stdin_err;   /* negative stdin read recorded by bare cat (inc.7) */       /* set by dispatch_command (inc.5) */
+static long        cat_stdin_err;
+static int         run_depth;       /* active run frames (inc.8) */   /* negative stdin read recorded by bare cat (inc.7) */       /* set by dispatch_command (inc.5) */
 static long        redir_save;      /* saved console fd slot, or -1 */
 
 static int shell_parse(const char *line)
@@ -1033,30 +1034,35 @@ static void dispatch_command(const char *cmd, const char *arg,
  * what the test observes (console exactly-once, restore).
  * fd 0 and fd 1 are saved before stage 0 and restored after
  * the last stage, on the failure path too. */
-static void run_pipeline(const char *line)
+static int is_session_cmd(const char *nm)
+{
+    return streq(nm, "exec") || streq(nm, "exit") ||
+           streq(nm, "pf");
+}
+
+static int run_pipeline(const char *line)
 {
     /* Pre-checks: nothing has run yet. */
     int aoff = 0;
     for (int s = 0; s < nstages_g; s++) {
         const char *nm = stg_argv[aoff];
-        if (streq(nm, "exec") || streq(nm, "exit") ||
-            streq(nm, "pf")) {
+        if (is_session_cmd(nm) || streq(nm, "run")) {
             puts_u("shell: "); puts_u(nm);
-            puts_u(" not supported in pipelines\r\n> ");
-            return;
+            puts_u(" not supported in pipelines\r\n");
+            return 0;
         }
         aoff += stg_argc[s] + 1;
     }
     if (redirect_g && gt_stage != nstages_g - 1) {
-        puts_u("shell: redirection in a pipeline must be on the last stage\r\n> ");
-        return;
+        puts_u("shell: redirection in a pipeline must be on the last stage\r\n");
+        return 0;
     }
     long tfd = -1;
     if (redirect_g) {
         tfd = sys_fcreate(redirect_g);
         if (tfd < 0) {
             puts_u("shell: cannot create "); puts_u(redirect_g);
-            puts_u("\r\n> "); return;
+            puts_u("\r\n"); return 0;
         }
     }
     long sv0 = -1, sv1 = -1;
@@ -1071,8 +1077,8 @@ static void run_pipeline(const char *line)
     if (sv0 < 0 || sv1 < 0) {
         if (sv0 >= 0) { sys_dup2(sv0, 0); sys_close(sv0); }
         if (tfd >= 0) sys_close(tfd);
-        puts_u("shell: pipeline failed\r\n> ");
-        return;
+        puts_u("shell: pipeline failed\r\n");
+        return 0;
     }
 
     long prev_read = -1;
@@ -1128,12 +1134,111 @@ static void run_pipeline(const char *line)
         puts_u(itoa(cat_stdin_err, nb));
         puts_u("\r\n");
         cat_stdin_err = 0;
-        if (failed) { puts_u("shell: pipeline failed\r\n> "); return; }
-        puts_u("> ");
-        return;
+        if (failed) puts_u("shell: pipeline failed\r\n");
+        return 0;
     }
-    if (failed) { puts_u("shell: pipeline failed\r\n> "); return; }
-    puts_u(redirect_g ? "> " : (prompt_nl ? "\r\n> " : "> "));
+    if (failed) { puts_u("shell: pipeline failed\r\n"); return 0; }
+    return redirect_g ? -1 : prompt_nl;
+}
+
+
+/* Execute one line (Phase 14 inc.8: the main loop's body,
+ * extracted behaviour-identically so `run` can drive it).
+ * Pipelines, redirection and plain dispatch, plus the
+ * script refusals. Returns the prompt flavour for the
+ * interactive caller: 1 = "\r\n> ", 0 = "> ", -1 = the
+ * line produced no console output (the caller still prints
+ * "> "; cmd_run's flavour accounting ignores -1). Nothing
+ * in here prints a prompt. */
+static int execute_line(char *line, long n)
+{
+    redir_restore();
+
+    /* Parse the line (Phase 14 inc.4). A plain command
+     * feeds the dispatch chain below with cmd/arg as the
+     * old first-space split produced them, with ONE
+     * change: the separator run after the command word
+     * no longer leaks into arg. arg is the raw remainder
+     * of the line starting at the second token (inner and
+     * trailing bytes byte-identical to before), and cmd
+     * is the first token; both keep their old copy caps. */
+    int pr = shell_parse(line);
+    if (pr == PARSE_EMPTY) return -1;
+    if (pr == PARSE_ERROR) {
+        puts_u("shell: parse error: "); puts_u(parse_err);
+        puts_u("\r\n");
+        return 0;
+    }
+
+    char cmd[64], arg[192];
+    {
+        const char *w = stg_argv[0];
+        int ci = 0;
+        while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
+        cmd[ci] = '\0';
+        if (redirect_g) {
+            build_stage_arg(0, stg_argc[0], line, arg);
+        } else {
+            const char *a = (ntok_g > 1) ? line + tok_start[1]
+                                         : line + n;
+            int ai = 0;
+            while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
+            arg[ai] = '\0';
+        }
+    }
+
+    /* Inside a script, the session commands are refused:
+     * a script must never end the shell session. Placed
+     * before the pipeline and redirect branches, so an
+     * `exit > log` line creates nothing. (Pipelines refuse
+     * them in run_pipeline's own pre-check.) */
+    if (run_depth > 0 && nstages_g == 1 && is_session_cmd(cmd)) {
+        puts_u("run: "); puts_u(cmd);
+        puts_u(" not allowed in a script\r\n");
+        return 0;
+    }
+
+    if (nstages_g > 1) return run_pipeline(line);
+    if (redirect_g) {
+        if (streq(cmd, "exec")) {
+            puts_u("shell: redirection not supported for exec\r\n");
+            return 0;
+        }
+        if (streq(cmd, "run")) {
+            puts_u("shell: redirection not supported for run\r\n");
+            return 0;
+        }
+        long tfd = sys_fcreate(redirect_g);
+        if (tfd < 0) {
+            puts_u("shell: cannot create "); puts_u(redirect_g);
+            puts_u("\r\n"); return 0;
+        }
+        long sv = -1;
+        for (long k = 15; k >= 3; k--)
+            if (sys_dup2(k, k) < 0) { sv = k; break; }
+        if (sv < 0 || sys_dup2(1, sv) < 0) {
+            sys_close(tfd);
+            puts_u("shell: redirection failed\r\n"); return 0;
+        }
+        redir_save = sv;
+        sys_dup2(tfd, 1);
+        sys_close(tfd);
+        /* The echo fallback must not see "> target":
+         * dispatch gets a rebuilt line (cmd + arg). */
+        char rline[256];
+        int ri = 0;
+        for (int j = 0; cmd[j] && ri < 250; j++) rline[ri++] = cmd[j];
+        if (arg[0]) {
+            rline[ri++] = ' ';
+            for (int j = 0; arg[j] && ri < 250; j++) rline[ri++] = arg[j];
+        }
+        rline[ri] = '\0';
+        dispatch_command(cmd, arg, rline, ri);
+        redir_restore();
+        return -1;
+    }
+    dispatch_command(cmd, arg, line, n);
+    return prompt_nl;
 }
 
 
@@ -1145,84 +1250,79 @@ void _start(long argc, char **argv)
 
     redir_save = -1;
     for (;;) {
-        redir_restore();
         char line[256];
         long n = readline(line, 256);
         if (n <= 0) continue;
         if (n > 0 && line[n-1] == '\n') line[--n] = '\0';
         if (n == 0) { puts_u("> "); continue; }
-
-        /* Parse the line (Phase 14 inc.4). A plain command
-         * feeds the dispatch chain below with cmd/arg as the
-         * old first-space split produced them, with ONE
-         * change: the separator run after the command word
-         * no longer leaks into arg. arg is the raw remainder
-         * of the line starting at the second token (inner and
-         * trailing bytes byte-identical to before), and cmd
-         * is the first token; both keep their old copy caps. */
-        int pr = shell_parse(line);
-        if (pr == PARSE_EMPTY) { puts_u("> "); continue; }
-        if (pr == PARSE_ERROR) {
-            puts_u("shell: parse error: "); puts_u(parse_err);
-            puts_u("\r\n> "); continue;
-        }
-
-        char cmd[64], arg[192];
-        {
-            const char *w = stg_argv[0];
-            int ci = 0;
-            while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
-            cmd[ci] = '\0';
-            if (redirect_g) {
-                build_stage_arg(0, stg_argc[0], line, arg);
-            } else {
-                const char *a = (ntok_g > 1) ? line + tok_start[1]
-                                             : line + n;
-                int ai = 0;
-                while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
-                arg[ai] = '\0';
-            }
-        }
-
-        if (nstages_g > 1) { run_pipeline(line); continue; }
-        if (redirect_g) {
-            if (streq(cmd, "exec")) {
-                puts_u("shell: redirection not supported for exec\r\n> ");
-                continue;
-            }
-            long tfd = sys_fcreate(redirect_g);
-            if (tfd < 0) {
-                puts_u("shell: cannot create "); puts_u(redirect_g);
-                puts_u("\r\n> "); continue;
-            }
-            long sv = -1;
-            for (long k = 15; k >= 3; k--)
-                if (sys_dup2(k, k) < 0) { sv = k; break; }
-            if (sv < 0 || sys_dup2(1, sv) < 0) {
-                sys_close(tfd);
-                puts_u("shell: redirection failed\r\n> "); continue;
-            }
-            redir_save = sv;
-            sys_dup2(tfd, 1);
-            sys_close(tfd);
-            /* The echo fallback must not see "> target":
-             * dispatch gets a rebuilt line (cmd + arg). */
-            char rline[256];
-            int ri = 0;
-            for (int j = 0; cmd[j] && ri < 250; j++) rline[ri++] = cmd[j];
-            if (arg[0]) {
-                rline[ri++] = ' ';
-                for (int j = 0; arg[j] && ri < 250; j++) rline[ri++] = arg[j];
-            }
-            rline[ri] = '\0';
-            dispatch_command(cmd, arg, rline, ri);
-            redir_restore();
-            puts_u("> ");
-            continue;
-        }
-        dispatch_command(cmd, arg, line, n);
-        puts_u(prompt_nl ? "\r\n> " : "> ");
+        int fl = execute_line(line, n);
+        puts_u(fl == 1 ? "\r\n> " : "> ");
     }
+}
+
+
+/* run <file>: execute a script (Phase 14 inc.8). Each line
+ * goes through execute_line, the same path as an
+ * interactive line; no prompt is printed per line — the
+ * lines' flavours are folded into prompt_nl, so the caller
+ * prints exactly one prompt when the script ends, with the
+ * flavour of the last line that produced console output.
+ * Errors (parse, not found, refusals) print and the script
+ * continues with the next line. Nesting is capped at 4
+ * active runs. The reader streams the file in 256-byte
+ * chunks, so there is no file-size cap; lines are capped
+ * at 255 chars — a longer line (after stripping one
+ * trailing CR) is skipped with a message, never truncated
+ * and executed, and a line containing a NUL byte is
+ * skipped the same way. A final line without a newline
+ * still executes. Script lines start with stdin_pipe
+ * cleared: they do not inherit an outer stage's wiring
+ * (and `run` is refused in pipelines and under
+ * redirection, so this is belt and braces). */
+static void cmd_run(const char *arg)
+{
+    if (!arg[0]) { puts_u("usage: run <file>\r\n"); return; }
+    if (run_depth >= 4) { puts_u("run: nesting too deep\r\n"); return; }
+    long fd = sys_open(arg);
+    if (fd < 0) { puts_u("run: not found: "); puts_u(arg); prompt_nl = 1; return; }
+    int saved_pipe = stdin_pipe; stdin_pipe = 0;
+    run_depth++;
+    int last = -1;
+    char rbuf[256]; long rlen = 0, rpos = 0;
+    int eof = 0;
+    for (;;) {
+        char lbuf[257];
+        int llen = 0, toolong = 0, has_nul = 0, any = 0, rderr = 0;
+        int hit_eof = 0;
+        for (;;) {
+            if (rpos >= rlen) {
+                rlen = sys_read(fd, rbuf, 256); rpos = 0;
+                if (rlen < 0) { rderr = 1; hit_eof = 1; break; }
+                if (rlen == 0) { eof = 1; hit_eof = 1; break; }
+            }
+            char c = rbuf[rpos++]; any = 1;
+            if (c == '\n') break;
+            if (c == '\0') { has_nul = 1; continue; }
+            if (llen < 256) lbuf[llen++] = c; else toolong = 1;
+        }
+        if (rderr) { puts_u("run: read error\r\n"); last = 0; break; }
+        if (!any && llen == 0 && !toolong && !has_nul) break;
+        if (llen > 0 && lbuf[llen - 1] == '\r') llen--;
+        if (toolong || llen > 255) {
+            puts_u("run: line too long, skipped\r\n"); last = 0;
+        } else if (has_nul) {
+            puts_u("run: line contains NUL, skipped\r\n"); last = 0;
+        } else {
+            lbuf[llen] = '\0';
+            int fl = execute_line(lbuf, llen);
+            if (fl >= 0) last = fl;
+        }
+        if (hit_eof || eof) break;
+    }
+    run_depth--;
+    stdin_pipe = saved_pipe;
+    sys_close(fd);
+    prompt_nl = last;
 }
 
 
@@ -1324,6 +1424,8 @@ static void dispatch_command(const char *cmd, const char *arg,
        
         return;
     }
+
+    if (streq(cmd, "run")) { cmd_run(arg); return; }
 
     if (streq(cmd, "cat")) {
         if (!arg[0]) {
