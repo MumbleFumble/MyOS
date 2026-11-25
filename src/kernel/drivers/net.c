@@ -830,6 +830,24 @@ struct tcp_conn {
      * 15 inc.4); the read path compares against it to decide
      * whether a window update is worth emitting. */
     uint32_t wnd_last;
+    /* Phase 15 inc.5 (Reno) congestion state, all bytes.
+     * cwnd/ssthresh evolve per the rules at tcp_cwnd_ack,
+     * tcp_timeout_collapse and the fast-retransmit block in
+     * tcp_input; in this one-segment-in-flight model they are
+     * tracked state, never a send gate (queue_tx already
+     * refuses while tx_len > 0, and cwnd never drops below one
+     * segment). peer_wnd is the last window the peer advertised
+     * (for the duplicate-ACK definition, not a send gate).
+     * dup_count counts consecutive duplicate ACKs; in_recovery
+     * suppresses a second fast retransmit for the same loss;
+     * rto_episode makes ssthresh recomputed only on the first
+     * timeout since snd_una last advanced. */
+    uint32_t cwnd;
+    uint32_t ssthresh;
+    uint32_t peer_wnd;
+    int dup_count;
+    int in_recovery;
+    int rto_episode;
 };
 static struct tcp_conn tcp_conns[TCP_MAX_CONN];
 /* The client connection in use by SYS_TCPECHO, or NULL. Slots in
@@ -938,6 +956,12 @@ static void tcp_send_seg(struct tcp_conn *c, uint8_t flags,
  * window has grown by at least this much — a quarter of the
  * receive capacity. */
 #define TCP_SWS_THRESH 512
+/* Phase 15 inc.5 (Reno): the send side's segment unit. The tx
+ * path caps one segment at TCP_TX_CAP, so one segment IS the
+ * MSS-equivalent every congestion formula below uses. */
+#define TCP_SEG         TCP_TX_CAP
+#define TCP_CWND_MAX    65535u
+#define TCP_SSTHRESH_INIT 65535u   /* slow start until the first loss */
 #define TCP_RTO_INIT 100
 #define TCP_RTO_MIN 20
 #define TCP_RTO_MAX 6000
@@ -1006,6 +1030,84 @@ static void tcp_backoff(struct tcp_conn *c)
     c->rto = c->rto * 2;
     if (c->rto > TCP_RTO_MAX)
         c->rto = TCP_RTO_MAX;
+}
+
+/* Phase 15 inc.5: slow-start / congestion-avoidance growth,
+ * called once per ACK that advances snd_una over new sequence
+ * space. Slow start adds one segment per ACK; congestion
+ * avoidance adds SEG*SEG/cwnd, roughly one segment per RTT
+ * (the integer increment is >= 16 at any cwnd up to the cap,
+ * never a stalling zero). */
+static void tcp_cwnd_ack(struct tcp_conn *c)
+{
+    if (c->cwnd < c->ssthresh)
+        c->cwnd += TCP_SEG;
+    else
+        c->cwnd += (TCP_SEG * TCP_SEG) / c->cwnd;
+    if (c->cwnd > TCP_CWND_MAX)
+        c->cwnd = TCP_CWND_MAX;
+}
+
+/* Phase 15 inc.5: resend the unacked tail of the tx segment.
+ * Shared by the timer path (tcp_conn_retransmit) and fast
+ * retransmit; deliberately does NOT back the RTO off — the
+ * timer path calls tcp_backoff itself, fast retransmit must
+ * not. Restamps the item clock (the retransmit gets a full
+ * RTO; RFC 6298 5.1's start-only-if-stopped is the one
+ * deviation, noted in the inc.5 report) and sets tx_rexmit,
+ * so no RTT sample is ever taken from this item (Karn). */
+static void tcp_resend_tx(struct tcp_conn *c)
+{
+    uint32_t off = c->snd_una - c->tx_seq;
+    uint32_t n = c->tx_len - off;
+    uint32_t save = c->snd_nxt;
+    c->snd_nxt = c->snd_una;
+    tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, c->tx + off, n);
+    c->snd_nxt = save;
+    c->tx_time = (uint32_t)timer_ticks();
+    c->tx_rexmit = 1;
+}
+
+/* Phase 15 inc.5: the timeout half of Reno, run alongside
+ * tcp_backoff at a timer-driven data/FIN resend (never for
+ * SYN/SYN-ACK resends: congestion state for a connection with
+ * nothing in flight is meaningless, and touching ssthresh
+ * there would silently end slow start). ssthresh is
+ * recomputed only on the FIRST timeout of an episode
+ * (rto_episode, cleared when snd_una advances) — RFC 5681
+ * 3.1 holds it constant across repeated retransmissions of
+ * the same segment. ssthresh = max(cwnd/2, 2*SEG): the cwnd
+ * form is a deliberate deviation from RFC 5681 eq. 4
+ * (FlightSize/2), because FlightSize <= SEG in this model
+ * would pin every reduction to the 2*SEG floor. cwnd always
+ * collapses to one segment. The serial line prints old->new
+ * whenever either value changed, which is what makes the
+ * evolution observable; the caller resends BEFORE this runs,
+ * so the print never delays the retransmit. */
+static void tcp_timeout_collapse(struct tcp_conn *c)
+{
+    uint32_t oc = c->cwnd, os = c->ssthresh;
+    if (!c->rto_episode) {
+        uint32_t ns = c->cwnd / 2;
+        if (ns < 2 * TCP_SEG)
+            ns = 2 * TCP_SEG;
+        c->ssthresh = ns;
+        c->rto_episode = 1;
+    }
+    c->cwnd = TCP_SEG;
+    c->dup_count = 0;
+    c->in_recovery = 0;
+    if (c->cwnd != oc || c->ssthresh != os) {
+        nputs("[tcp] timeout cwnd=");
+        nputu(oc);
+        nputs("->");
+        nputu(c->cwnd);
+        nputs(" ssthresh=");
+        nputu(os);
+        nputs("->");
+        nputu(c->ssthresh);
+        nputs("\r\n");
+    }
 }
 
 /* Unpredictable ISNs (Phase 13 inc.4, review-009; RFC 6528
@@ -1189,6 +1291,12 @@ static void tcp_re_clear(struct tcp_conn *c)
     c->pfin = 0;
     c->pfin_seq = 0;
     c->wnd_last = TCP_RX_CAP;   /* nothing advertised yet */
+    c->cwnd = TCP_SEG;
+    c->ssthresh = TCP_SSTHRESH_INIT;
+    c->peer_wnd = 65535u;
+    c->dup_count = 0;
+    c->in_recovery = 0;
+    c->rto_episode = 0;
 }
 
 static void tcp_re_insert(struct tcp_conn *c, uint32_t seq,
@@ -1383,14 +1491,8 @@ static void tcp_conn_retransmit(struct tcp_conn *c)
     } else if (c->tx_len > 0 && c->snd_una < c->tx_seq + c->tx_len) {
         if (now - c->tx_time < tcp_rto(c))
             return;
-        uint32_t off = c->snd_una - c->tx_seq;
-        uint32_t n = c->tx_len - off;
-        uint32_t save = c->snd_nxt;
-        c->snd_nxt = c->snd_una;
-        tcp_send_seg(c, TCP_F_PSH | TCP_F_ACK, c->tx + off, n);
-        c->snd_nxt = save;
-        c->tx_time = now;
-        c->tx_rexmit = 1;
+        tcp_resend_tx(c);
+        tcp_timeout_collapse(c);
         tcp_backoff(c);
     } else if (c->fin_queued && c->snd_una <= c->fin_seq) {
         if (now - c->fin_time < tcp_rto(c))
@@ -1400,6 +1502,7 @@ static void tcp_conn_retransmit(struct tcp_conn *c)
         tcp_send_seg(c, TCP_F_FIN | TCP_F_ACK, 0, 0);
         c->snd_nxt = save;
         c->fin_time = now;
+        tcp_timeout_collapse(c);
         tcp_backoff(c);
     }
 }
@@ -1574,6 +1677,7 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     uint16_t sport = be16(t), dport = be16(t + 2);
     uint32_t seq = be32(t + 4), ack = be32(t + 8);
     uint8_t flags = t[13];
+    uint16_t seg_win = be16(t + 14);
     const uint8_t *src_ip = ip + 12;
 
     if (l4_cksum(src_ip, ip + 16, 6, t, seg_len) != 0) {
@@ -1695,8 +1799,15 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
         } else if ((flags & TCP_F_ACK) && ack == c->snd_nxt) {
             c->snd_una = ack;
             c->state = TCP_ESTABLISHED;
-            if (!c->tx_rexmit)
+            if (!c->tx_rexmit) {
                 tcp_rtt_sample(c, (uint32_t)timer_ticks() - c->tx_time);
+                /* The handshake ACK covers new sequence space
+                 * (the SYN) and grows cwnd like any other —
+                 * unless the SYN-ACK had to be retransmitted,
+                 * when RFC 5681 keeps the window at one
+                 * segment after a handshake loss. */
+                tcp_cwnd_ack(c);
+            }
         }
         return;
     }
@@ -1706,15 +1817,40 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
             c->snd_una = ack;
             c->rcv_nxt = seq + 1;
             c->state = TCP_ESTABLISHED;
-            if (!c->tx_rexmit)
+            if (!c->tx_rexmit) {
                 tcp_rtt_sample(c, (uint32_t)timer_ticks() - c->tx_time);
+                /* Same handshake growth rule as the passive
+                 * side: skipped if our SYN was retransmitted. */
+                tcp_cwnd_ack(c);
+            }
             tcp_send_seg(c, TCP_F_ACK, 0, 0);
         }
         return;
     }
+    /* The peer's advertised window is tracked from every
+     * segment that reaches the synchronised-state handling
+     * (i.e. every acceptable segment); the duplicate-ACK
+     * evaluation below compares against the PREVIOUS value. */
+    uint32_t prev_wnd = c->peer_wnd;
+    c->peer_wnd = seg_win;
     /* ACK processing: advance snd_una over data and FIN. */
+    int ack_advanced = 0;
     if ((flags & TCP_F_ACK) && ack > c->snd_una && ack <= c->snd_nxt) {
+        ack_advanced = 1;
         c->snd_una = ack;
+        /* Any advance ends the duplicate run and the timeout
+         * episode. Leaving fast recovery (RFC 5681 step 6):
+         * cwnd deflates to ssthresh and this ACK does not also
+         * grow it; otherwise the ACK grows cwnd per
+         * tcp_cwnd_ack. */
+        c->dup_count = 0;
+        c->rto_episode = 0;
+        if (c->in_recovery) {
+            c->in_recovery = 0;
+            c->cwnd = c->ssthresh;
+        } else {
+            tcp_cwnd_ack(c);
+        }
         int data_done = 0;
         if (c->tx_len > 0 && ack >= c->tx_seq + c->tx_len) {
             c->tx_len = 0;
@@ -1739,6 +1875,60 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
             c->fin_queued = 0;
             if (c->state == TCP_LAST_ACK)
                 tcp_slot_free(c);
+        }
+    }
+    /* Duplicate ACKs and fast retransmit (Phase 15 inc.5).
+     * A segment counts as a duplicate ACK under RFC 5681's
+     * definition: ACK flag set, it acknowledges nothing new
+     * (ack == snd_una and the advance block above did not
+     * fire), data is outstanding, it carries no data and no
+     * SYN/FIN, and its advertised window is UNCHANGED from
+     * the previous segment's — a window-changing ACK is a
+     * window update, not a duplicate, and (like any other
+     * non-duplicate ACK) resets the count rather than merely
+     * not incrementing it. Duplicates are not counted while
+     * in fast recovery (a second halving for the same loss
+     * would be wrong; Reno inflates instead, which has no
+     * meaning for one segment in flight) or while the peer's
+     * window is zero (its ACKs are flow-control probes, not
+     * loss signals). On the third: resend immediately — the
+     * raw resend, NO RTO backoff — then set ssthresh =
+     * max(cwnd/2, 2*SEG) (cwnd form: see tcp_timeout_collapse)
+     * and cwnd = ssthresh, the simple fast-recovery form;
+     * full Reno inflation exists to clock new data out during
+     * recovery and there is no pipeline here to clock. The
+     * resend goes out before the serial print. Nothing here
+     * returns: the segment still flows into the data/FIN
+     * handling below. */
+    if ((flags & TCP_F_ACK) && !ack_advanced) {
+        int is_dup = ack == c->snd_una && c->tx_len > 0 && dlen == 0
+            && !(flags & (TCP_F_SYN | TCP_F_FIN))
+            && seg_win == prev_wnd && prev_wnd != 0
+            && !c->in_recovery;
+        if (is_dup) {
+            c->dup_count++;
+            if (c->dup_count >= 3) {
+                uint32_t oc = c->cwnd, os = c->ssthresh;
+                uint32_t ns = c->cwnd / 2;
+                if (ns < 2 * TCP_SEG)
+                    ns = 2 * TCP_SEG;
+                c->ssthresh = ns;
+                c->cwnd = ns;
+                c->in_recovery = 1;
+                c->dup_count = 0;
+                tcp_resend_tx(c);
+                nputs("[tcp] fast-retransmit cwnd=");
+                nputu(oc);
+                nputs("->");
+                nputu(c->cwnd);
+                nputs(" ssthresh=");
+                nputu(os);
+                nputs("->");
+                nputu(c->ssthresh);
+                nputs("\r\n");
+            }
+        } else {
+            c->dup_count = 0;
         }
     }
     /* Data and FIN (Phase 15 inc.3: reassembly). The FIN is
