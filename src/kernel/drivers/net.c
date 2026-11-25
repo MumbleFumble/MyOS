@@ -826,6 +826,10 @@ struct tcp_conn {
     uint32_t tx_time;
     int tx_rexmit;
     uint32_t fin_time;
+    /* Last receive window this connection advertised (Phase
+     * 15 inc.4); the read path compares against it to decide
+     * whether a window update is worth emitting. */
+    uint32_t wnd_last;
 };
 static struct tcp_conn tcp_conns[TCP_MAX_CONN];
 /* The client connection in use by SYS_TCPECHO, or NULL. Slots in
@@ -868,7 +872,7 @@ static uint16_t tcp_checksum(const uint8_t *src, const uint8_t *dst,
 
 static void tcp_send_raw(const uint8_t *dst_mac, const uint8_t *dst_ip,
                          uint16_t sport, uint16_t dport, uint32_t seq,
-                         uint32_t ack, uint8_t flags,
+                         uint32_t ack, uint8_t flags, uint16_t window,
                          const uint8_t *data, uint32_t dlen)
 {
     static uint8_t seg[20 + TCP_TX_CAP];
@@ -878,7 +882,7 @@ static void tcp_send_raw(const uint8_t *dst_mac, const uint8_t *dst_ip,
     put_be32(seg + 8, ack);
     seg[12] = 5 << 4;
     seg[13] = flags;
-    put_be16(seg + 14, TCP_RX_CAP);
+    put_be16(seg + 14, window);
     put_be16(seg + 16, 0);
     put_be16(seg + 18, 0);
     for (uint32_t i = 0; i < dlen; i++)
@@ -887,11 +891,35 @@ static void tcp_send_raw(const uint8_t *dst_mac, const uint8_t *dst_ip,
     send_ipv4(dst_mac, dst_ip, 6, seg, (uint16_t)(20 + dlen));
 }
 
+/* The connection's free receive space (Phase 15 inc.4):
+ * TCP_RX_CAP minus everything the receive side is holding —
+ * delivered-but-unread bytes in rx (rx_len) plus buffered
+ * out-of-order bytes (set bits in ooo_map). The two sets are
+ * disjoint (rx bytes sit below rcv_nxt, map bytes at or above
+ * it) and a drain moves bytes between them without changing
+ * the total, so nothing double-counts; duplicates never set
+ * new map bits (first write wins) and bytes below rcv_nxt are
+ * head-trimmed at insert, so retransmissions cannot inflate
+ * occupancy either. A peer that overfills anyway (inserts
+ * ignore the advertised window) can push occupancy past
+ * capacity; the result clamps at 0, never negative. This is
+ * THE window every connection segment advertises. */
+static uint32_t tcp_rcv_window(struct tcp_conn *c)
+{
+    uint32_t occ = c->rx_len;
+    for (uint32_t i = 0; i < TCP_RX_CAP; i++)
+        if (c->ooo_map[i])
+            occ++;
+    return occ >= TCP_RX_CAP ? 0 : TCP_RX_CAP - occ;
+}
+
 static void tcp_send_seg(struct tcp_conn *c, uint8_t flags,
                          const uint8_t *data, uint32_t dlen)
 {
+    uint32_t w = tcp_rcv_window(c);
+    c->wnd_last = w;
     tcp_send_raw(c->peer_mac, c->peer_ip, c->local_port, c->peer_port,
-                 c->snd_nxt, c->rcv_nxt, flags, data, dlen);
+                 c->snd_nxt, c->rcv_nxt, flags, (uint16_t)w, data, dlen);
 }
 
 /* ---- Retransmission timing (Phase 15 inc.2) ----
@@ -905,6 +933,11 @@ static void tcp_send_seg(struct tcp_conn *c, uint8_t flags,
  * deliberate deviation from RFC 6298's 1 s SHOULD, stated in
  * the inc.2 report); RTO_MAX is 6000 (60 s, the RFC 6298 cap
  * shape, beyond every syscall wait bound here). */
+/* Receiver silly-window threshold (Phase 15 inc.4): a
+ * window update from a nonzero base is emitted once the
+ * window has grown by at least this much — a quarter of the
+ * receive capacity. */
+#define TCP_SWS_THRESH 512
 #define TCP_RTO_INIT 100
 #define TCP_RTO_MIN 20
 #define TCP_RTO_MAX 6000
@@ -1155,6 +1188,7 @@ static void tcp_re_clear(struct tcp_conn *c)
         c->ooo_map[i] = 0;
     c->pfin = 0;
     c->pfin_seq = 0;
+    c->wnd_last = TCP_RX_CAP;   /* nothing advertised yet */
 }
 
 static void tcp_re_insert(struct tcp_conn *c, uint32_t seq,
@@ -1254,8 +1288,25 @@ static int tcp_conn_recv(struct tcp_conn *c, uint8_t *out, uint32_t cap)
      * tcp_input (they were stuck behind a full rx); ACK them
      * now, unless the drain already ACKed a consumed FIN or
      * freed the slot. */
-    if (!(m & (RE_FIN_ACKED | RE_FREED)) && c->rcv_nxt != rn0)
+    int acked = (m & (RE_FIN_ACKED | RE_FREED)) != 0;
+    if (!acked && c->rcv_nxt != rn0) {
         tcp_send_seg(c, TCP_F_ACK, 0, 0);
+        acked = 1;
+    }
+    /* Window update (Phase 15 inc.4): if this read freed
+     * receive space the peer has not been told about, say so
+     * now instead of waiting for inbound traffic. Reopening
+     * from an advertised zero always emits (a compliant
+     * sender is parked until it hears otherwise); growth
+     * from a nonzero base emits once it reaches
+     * TCP_SWS_THRESH, so small reads do not dribble the
+     * window forward an ACK at a time. */
+    if (!acked && !(m & RE_FREED)) {
+        uint32_t w = tcp_rcv_window(c);
+        if (w > c->wnd_last
+            && (c->wnd_last == 0 || w - c->wnd_last >= TCP_SWS_THRESH))
+            tcp_send_seg(c, TCP_F_ACK, 0, 0);
+    }
     return (int)n;
 }
 
@@ -1586,12 +1637,12 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
             return;
         /* RFC 793 reset for a segment with no connection. */
         if (flags & TCP_F_ACK)
-            tcp_send_raw(f + 6, src_ip, dport, sport, ack, 0, TCP_F_RST, 0, 0);
+            tcp_send_raw(f + 6, src_ip, dport, sport, ack, 0, TCP_F_RST, 0, 0, 0);
         else
             tcp_send_raw(f + 6, src_ip, dport, sport, 0,
                          seq + dlen + ((flags & TCP_F_SYN) ? 1 : 0)
                              + ((flags & TCP_F_FIN) ? 1 : 0),
-                         TCP_F_RST | TCP_F_ACK, 0, 0);
+                         TCP_F_RST | TCP_F_ACK, 0, 0, 0);
         return;
     }
     if (flags & TCP_F_RST) {
@@ -1712,7 +1763,8 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
     if (dlen > 0 && !c->peer_fin)
         tcp_re_insert(c, seq, data, dlen);
     int rm = tcp_re_drain(c);
-    if ((dlen > 0 || fin) && !(rm & (RE_FIN_ACKED | RE_FREED)))
+    if ((dlen > 0 || fin || seq != c->rcv_nxt)
+        && !(rm & (RE_FIN_ACKED | RE_FREED)))
         tcp_send_seg(c, TCP_F_ACK, 0, 0);   /* ack (or dup-ack) */
 }
 
