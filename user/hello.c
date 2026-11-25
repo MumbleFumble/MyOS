@@ -867,7 +867,9 @@ static int         word_toks[256];  /* token index of each stage word */
 static int         nword_toks;
 static int         gt_tok;          /* token index of '>', or -1 */
 static int         gt_stage;        /* stage index holding '>' */
-static int         prompt_nl;       /* set by dispatch_command (inc.5) */
+static int         prompt_nl;
+static int         stdin_pipe;      /* fd 0 wired to a pipe for this dispatch (inc.7) */
+static long        cat_stdin_err;   /* negative stdin read recorded by bare cat (inc.7) */       /* set by dispatch_command (inc.5) */
 static long        redir_save;      /* saved console fd slot, or -1 */
 
 static int shell_parse(const char *line)
@@ -1110,6 +1112,7 @@ static void run_pipeline(const char *line)
             for (int j = 0; sarg[j] && ri < 250; j++) rline[ri++] = sarg[j];
         }
         rline[ri] = '\0';
+        stdin_pipe = (s > 0);
         dispatch_command(scmd, sarg, rline, ri);
         aoff += stg_argc[s] + 1;
         woff += stg_argc[s];
@@ -1118,6 +1121,17 @@ static void run_pipeline(const char *line)
     if (tfd >= 0) sys_close(tfd);
     sys_dup2(sv0, 0); sys_close(sv0);
     sys_dup2(sv1, 1); sys_close(sv1);
+    stdin_pipe = 0;
+    if (cat_stdin_err) {
+        char nb[24];
+        puts_u("shell: cat: stdin read error ");
+        puts_u(itoa(cat_stdin_err, nb));
+        puts_u("\r\n");
+        cat_stdin_err = 0;
+        if (failed) { puts_u("shell: pipeline failed\r\n> "); return; }
+        puts_u("> ");
+        return;
+    }
     if (failed) { puts_u("shell: pipeline failed\r\n> "); return; }
     puts_u(redirect_g ? "> " : (prompt_nl ? "\r\n> " : "> "));
 }
@@ -1312,7 +1326,33 @@ static void dispatch_command(const char *cmd, const char *arg,
     }
 
     if (streq(cmd, "cat")) {
-        if (!arg[0]) { puts_u("usage: cat <file>\r\n"); return; }
+        if (!arg[0]) {
+            if (!stdin_pipe) { puts_u("usage: cat <file>\r\n"); return; }
+            /* Bare cat as a filter (Phase 14 inc.7): the
+             * shell wired fd 0 to a pipe for this stage.
+             * Copy fd 0 to fd 1 until a read returns <= 0:
+             * 0 is EOF (under sequential wiring the writers
+             * are gone before a consumer dispatches); a
+             * negative value (-2 would-block, -1) also ends
+             * the copy and is recorded for the caller to
+             * report on the console after restore, since
+             * nothing inside one dispatch can add data and
+             * retrying would spin. A write returning other
+             * than the full chunk (full downstream ring,
+             * closed reader) stops the copy and drops the
+             * rest; no write is ever retried. When fd 0 is
+             * the console stdin_pipe is 0 and the usage
+             * branch above runs, exactly as before, so
+             * interactive bare cat cannot hang the shell. */
+            char buf[128];
+            long r;
+            while ((r = sys_read(STDIN, buf, 127)) > 0) {
+                if (sys_write(STDOUT, buf, r) != r) break;
+            }
+            if (r < 0) cat_stdin_err = r;
+            prompt_nl = 1;
+            return;
+        }
         long fd = sys_open(arg);
         if (fd < 0) { puts_u("cat: not found: "); puts_u(arg); prompt_nl = 1; return; }
         char buf[128];

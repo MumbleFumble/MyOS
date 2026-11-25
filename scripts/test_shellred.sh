@@ -13,8 +13,9 @@
 #  - "write note.txt hello world > wlog.txt" stores the text
 #    in note.txt and the builtin's own output ("written") in
 #    wlog.txt;
-#  - a pipeline line with a target EXECUTES (inc.6): the last
-#    stage is a bare cat, so its usage line lands in pipe.txt
+#  - a pipeline line with a target EXECUTES (inc.6) as a
+#    pass-through (inc.7): the last stage is a bare cat, so
+#    the data itself lands in pipe.txt
 #    message and creates nothing;
 #  - an unopenable target (a 70-char name; MyFS names are
 #    capped at 63) prints "shell: cannot create", runs
@@ -91,7 +92,7 @@ sleep 2
 [ "$(count 'written' "$SER")" -eq 1 ] || fail "console 'written' count != 1 (redirected write output leaked, or plain write broke)"
 [ "$(count 'hello world' "$SER")" -eq 0 ] || fail "'hello world' reached the console"
 [ "$(count 'pipelines not yet supported' "$SER")" -eq 0 ] || fail "pipelines message should be gone"
-[ "$(count 'usage: cat' "$SER")" -eq 0 ] || fail "bare-cat usage leaked to console instead of pipe.txt"
+[ "$(count 'usage: cat' "$SER")" -eq 0 ] || fail "usage printed although the piped bare cat should copy into pipe.txt"
 [ "$(count 'shell: cannot create' "$SER")" -eq 1 ] || fail "cannot-create error missing"
 [ "$(count 'listing.txt' "$SER")" -eq 1 ] || fail "listing.txt not shown exactly once (by its cat)"
 
@@ -115,9 +116,9 @@ assert live.get('wlog.txt') == b'written\r\n', live.get('wlog.txt')
 lst = live.get('listing.txt', b'')
 assert b'words.txt' in lst and b'out.txt' in lst and b'listing.txt' in lst, lst
 assert b'wlog.txt' not in lst and b'note.txt' not in lst, lst
-assert live.get('pipe.txt') == b'usage: cat <file>\r\n', live.get('pipe.txt')
+assert live.get('pipe.txt') == b'alpha beta gamma\n', live.get('pipe.txt')
 assert not any(len(k) >= 64 for k in live), list(live)
-print("[test] host-side image check: out.txt byte-identical (truncated on re-redirect), wlog/note split correct, listing captured, pipe.txt holds the piped bare-cat usage, no long-name file")
+print("[test] host-side image check: out.txt byte-identical (truncated on re-redirect), wlog/note split correct, listing captured, pipe.txt holds the passed-through data, no long-name file")
 PYEOF
 
 echo "[test] PASS: redirection executes with exact restore, truncation, and honest exec/open-failure behaviour"

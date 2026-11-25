@@ -7,9 +7,10 @@
 #  - collapsed separators now work: "cat  words.txt" (two
 #    spaces) reads the file (the old first-space split handed
 #    arg a leading space and the open failed);
-#  - "cat words.txt|cat" EXECUTES (inc.6): stage 1's output is
-#    swallowed by the pipe; the bare stage-2 cat prints its
-#    usage to the console exactly once
+#  - "cat words.txt|cat" EXECUTES as a pass-through (inc.6
+#    plumbing, inc.7 filter): the bare stage-2 cat copies the
+#    pipe to the console, so the content appears and the
+#    usage line never does
 #    message and executes nothing; "cat words.txt > out.txt"
 #    EXECUTES since Phase 14 inc.5 (out.txt is created with the
 #    file's contents; positive coverage in test_shellred.sh);
@@ -95,7 +96,7 @@ sleep 2
 [ "$(count 'delta epsilon' "$SER")" -ge 1 ] || fail "appended line missing"
 [ "$(count 'not found:  words' "$SER")" -eq 0 ] || fail "double-space arg leak still present"
 [ "$(count 'pipelines not yet supported' "$SER")" -eq 0 ] || fail "pipelines message should be gone"
-[ "$(count 'usage: cat <file>' "$SER")" -eq 1 ] || fail "piped bare-cat usage count != 1"
+[ "$(count 'usage: cat <file>' "$SER")" -eq 0 ] || fail "piped bare cat printed usage instead of copying"
 [ "$(count 'shell: parse error: empty command in pipeline' "$SER")" -eq 1 ] || fail "empty-stage error missing"
 [ "$(count 'shell: parse error: missing redirect target' "$SER")" -eq 1 ] || fail "missing-target error missing"
 [ "$(count 'shell: parse error: multiple redirections' "$SER")" -eq 1 ] || fail "multiple-redirections error missing"
