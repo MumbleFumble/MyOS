@@ -797,6 +797,16 @@ struct tcp_conn {
     uint32_t snd_una, snd_nxt, rcv_nxt;
     uint8_t rx[TCP_RX_CAP];
     uint32_t rx_len;
+    /* Out-of-order reassembly (Phase 15 inc.3): ooo_buf[i]
+     * holds the byte for sequence rcv_nxt + i when ooo_map[i]
+     * is set. A pending FIN (arrived behind a gap) is recorded
+     * as pfin/pfin_seq and consumed by the drain once rcv_nxt
+     * reaches it; inserts and drains clamp at pfin_seq so data
+     * can never jump past it. */
+    uint8_t ooo_buf[TCP_RX_CAP];
+    uint8_t ooo_map[TCP_RX_CAP];
+    uint32_t pfin_seq;
+    int pfin;
     uint8_t tx[TCP_TX_CAP];
     uint32_t tx_seq, tx_len;   /* unacked data: seq + length */
     uint32_t fin_seq;
@@ -821,6 +831,10 @@ static struct tcp_conn tcp_conns[TCP_MAX_CONN];
 /* The client connection in use by SYS_TCPECHO, or NULL. Slots in
  * state TCP_CLOSED are free. */
 static struct tcp_conn *tcp_cur;
+
+static void tcp_slot_free(struct tcp_conn *c);
+static void tcp_re_clear(struct tcp_conn *c);
+static int tcp_re_drain(struct tcp_conn *c);
 
 /* One's-complement checksum over the pseudo-header + segment.
  * For sending, call with the segment's checksum field zeroed. For
@@ -1043,6 +1057,7 @@ void net_tcp_reset(void)
     c->peer_fin = 0;
     c->error = 0;
     c->is_server = 0;
+    tcp_re_clear(c);
 }
 
 int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
@@ -1066,6 +1081,7 @@ int net_tcp_connect(const uint8_t ip[4], const uint8_t mac[6], uint16_t port)
     c->peer_fin = 0;
     c->error = 0;
     c->is_server = 0;
+    tcp_re_clear(c);
     tcp_rtt_init(c);
     c->state = TCP_SYN_SENT;
     tcp_send_seg(c, TCP_F_SYN, 0, 0);
@@ -1121,14 +1137,125 @@ static void tcp_conn_queue_tx(struct tcp_conn *c, const uint8_t *data,
     c->snd_nxt += len;
 }
 
+/* ---- Out-of-order reassembly (Phase 15 inc.3) ----
+ * Design reviewed with Claude. Every data segment in a
+ * synchronised state is inserted into the byte map (head
+ * trimmed with a signed comparison, tail trimmed at the
+ * receive window and at any pending FIN, first write wins so
+ * retransmitted bytes can never rewrite buffered ones), and
+ * the drain moves the contiguous prefix into rx, advancing
+ * rcv_nxt only by bytes actually delivered there — which is
+ * what keeps tcp_conn_eof's condition (peer_fin && rx_len
+ * == 0) sound: a FIN is consumed only once every byte before
+ * it is in rx or already read. */
+
+static void tcp_re_clear(struct tcp_conn *c)
+{
+    for (uint32_t i = 0; i < TCP_RX_CAP; i++)
+        c->ooo_map[i] = 0;
+    c->pfin = 0;
+    c->pfin_seq = 0;
+}
+
+static void tcp_re_insert(struct tcp_conn *c, uint32_t seq,
+                          const uint8_t *data, uint32_t dlen)
+{
+    if ((int32_t)(seq - c->rcv_nxt) < 0) {
+        uint32_t cut = c->rcv_nxt - seq;
+        if (cut >= dlen)
+            return;   /* entirely already delivered */
+        data += cut;
+        dlen -= cut;
+        seq = c->rcv_nxt;
+    }
+    uint32_t off = seq - c->rcv_nxt;
+    uint32_t lim = TCP_RX_CAP;
+    if (c->pfin) {
+        uint32_t pl = c->pfin_seq - c->rcv_nxt;
+        if (pl < lim)
+            lim = pl;
+    }
+    if (off >= lim)
+        return;
+    if (dlen > lim - off)
+        dlen = lim - off;
+    for (uint32_t i = 0; i < dlen; i++) {
+        if (!c->ooo_map[off + i]) {
+            c->ooo_buf[off + i] = data[i];
+            c->ooo_map[off + i] = 1;
+        }
+    }
+}
+
+#define RE_FIN_ACKED 1   /* drain consumed the FIN and ACKed it */
+#define RE_FREED 2       /* ... and freed the slot (FIN_WAIT) */
+
+/* Move the contiguous buffered prefix into rx; consume a
+ * pending FIN the prefix completes. The FIN's ACK is sent
+ * here, before any slot free, mirroring the old direct FIN
+ * path's ordering; callers consult the returned mask so no
+ * second ACK is emitted for the same event. */
+static int tcp_re_drain(struct tcp_conn *c)
+{
+    int mask = 0;
+    uint32_t lim = TCP_RX_CAP;
+    if (c->pfin) {
+        uint32_t pl = c->pfin_seq - c->rcv_nxt;
+        if (pl < lim)
+            lim = pl;
+    }
+    uint32_t k = 0;
+    while (k < lim && c->ooo_map[k])
+        k++;
+    uint32_t room = TCP_RX_CAP - c->rx_len;
+    uint32_t n = k < room ? k : room;
+    if (n) {
+        for (uint32_t i = 0; i < n; i++)
+            c->rx[c->rx_len + i] = c->ooo_buf[i];
+        c->rx_len += n;
+        c->rcv_nxt += n;
+        for (uint32_t i = 0; i + n < TCP_RX_CAP; i++) {
+            c->ooo_buf[i] = c->ooo_buf[i + n];
+            c->ooo_map[i] = c->ooo_map[i + n];
+        }
+        for (uint32_t i = TCP_RX_CAP - n; i < TCP_RX_CAP; i++)
+            c->ooo_map[i] = 0;
+    }
+    if (c->pfin && c->rcv_nxt == c->pfin_seq) {
+        c->pfin = 0;
+        c->rcv_nxt++;
+        c->peer_fin = 1;
+        for (uint32_t i = 0; i < TCP_RX_CAP; i++)
+            c->ooo_map[i] = 0;
+        tcp_send_seg(c, TCP_F_ACK, 0, 0);
+        mask |= RE_FIN_ACKED;
+        if (c->state == TCP_ESTABLISHED)
+            c->state = TCP_CLOSE_WAIT;
+        else if (c->state == TCP_FIN_WAIT) {
+            tcp_slot_free(c);
+            mask |= RE_FREED;
+        }
+    }
+    return mask;
+}
+
 static int tcp_conn_recv(struct tcp_conn *c, uint8_t *out, uint32_t cap)
 {
+    uint32_t rn0 = c->rcv_nxt;
+    int m = tcp_re_drain(c);
     uint32_t n = c->rx_len < cap ? c->rx_len : cap;
     for (uint32_t i = 0; i < n; i++)
         out[i] = c->rx[i];
     for (uint32_t i = n; i < c->rx_len; i++)
         c->rx[i - n] = c->rx[i];
     c->rx_len -= n;
+    m |= tcp_re_drain(c);
+    /* Bytes the recv path itself drained were never ACKed by
+     * tcp_input (they were stuck behind a full rx); ACK them
+     * now, unless the drain already ACKed a consumed FIN or
+     * freed the slot. */
+    if (!(m & (RE_FIN_ACKED | RE_FREED)) && c->rcv_nxt != rn0)
+        tcp_send_seg(c, TCP_F_ACK, 0, 0);
     return (int)n;
 }
 
@@ -1174,6 +1301,7 @@ static void tcp_slot_free(struct tcp_conn *c)
     c->tx_len = 0;
     c->fin_queued = 0;
     c->peer_fin = 0;
+    tcp_re_clear(c);
 }
 
 void net_tcp_close(void)
@@ -1442,6 +1570,7 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
                     ns->peer_fin = 0;
                     ns->error = 0;
                     ns->is_server = 1;
+                    tcp_re_clear(ns);
                     tcp_rtt_init(ns);
                     ns->state = TCP_SYN_RCVD;
                     tcp_send_seg(ns, TCP_F_SYN | TCP_F_ACK, 0, 0);
@@ -1561,28 +1690,30 @@ static void tcp_input(const uint8_t *f, uint16_t len, uint16_t ip_total)
                 tcp_slot_free(c);
         }
     }
-    /* In-order data. */
-    if (dlen > 0) {
-        if (seq == c->rcv_nxt) {
-            uint32_t room = TCP_RX_CAP - c->rx_len;
-            uint32_t n = dlen < room ? dlen : room;
-            for (uint32_t i = 0; i < n; i++)
-                c->rx[c->rx_len + i] = data[i];
-            c->rx_len += n;
-            c->rcv_nxt += n;
+    /* Data and FIN (Phase 15 inc.3: reassembly). The FIN is
+     * recorded BEFORE the segment's data is inserted, and the
+     * insert and drain both clamp at its sequence, so data
+     * can never jump past a pending FIN and strand it. The
+     * drain consumes the FIN once the gap before it fills.
+     * Exactly one ACK is emitted per segment: by the drain
+     * when it consumes the FIN, otherwise here (which also
+     * covers retransmitted FINs whose sequence has already
+     * passed — the old code ACKed those never). Nothing is
+     * inserted once the peer's FIN has been consumed. */
+    int fin = (flags & TCP_F_FIN) != 0;
+    if (fin && !c->peer_fin && !c->pfin) {
+        uint32_t fend = seq + dlen;
+        if ((int32_t)(fend - c->rcv_nxt) >= 0
+            && fend - c->rcv_nxt <= TCP_RX_CAP) {
+            c->pfin = 1;
+            c->pfin_seq = fend;
         }
+    }
+    if (dlen > 0 && !c->peer_fin)
+        tcp_re_insert(c, seq, data, dlen);
+    int rm = tcp_re_drain(c);
+    if ((dlen > 0 || fin) && !(rm & (RE_FIN_ACKED | RE_FREED)))
         tcp_send_seg(c, TCP_F_ACK, 0, 0);   /* ack (or dup-ack) */
-    }
-    /* FIN, in order after any data in this segment. */
-    if ((flags & TCP_F_FIN) && seq + dlen == c->rcv_nxt) {
-        c->rcv_nxt++;
-        c->peer_fin = 1;
-        tcp_send_seg(c, TCP_F_ACK, 0, 0);
-        if (c->state == TCP_ESTABLISHED)
-            c->state = TCP_CLOSE_WAIT;
-        else if (c->state == TCP_FIN_WAIT)
-            tcp_slot_free(c);
-    }
 }
 
 void net_rx_task(void)

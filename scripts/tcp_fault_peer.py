@@ -151,7 +151,7 @@ def start_fin(ack):
 
 def handle(fr):
     global gport, gseq0, state, data_seq, data_seen, stored
-    global echo_due, echo_sent, ooo_stage, guest_fin, acked_fin
+    global echo_due, echo_sent, ooo_stage, guest_fin, acked_fin, nxt
     if len(fr) < 14:
         return
     etype = fr[12:14]
@@ -265,7 +265,8 @@ def handle(fr):
         echo_seq = ISS + 1 + len(GREETING)
         if ack == echo_seq and ooo_stage == 1:
             log(f"GUEST DUP-ACK: guest ack stayed at {ack} after the "
-                f"out-of-order segment (dropped, not buffered)")
+                f"out-of-order segment (gap signalled; under "
+                f"reassembly the segment is buffered, not dropped)")
             return
         if ack == echo_seq + len(stored) // 2 and ooo_stage == 1:
             log(f"GUEST HALF-ACK: guest ack={ack} covers only "
@@ -276,6 +277,9 @@ def handle(fr):
             ooo_stage = 2
             return
         if ack == echo_seq + len(stored):
+            # Segment 1 was sent last, so nxt undercounts the
+            # stream end; the FIN must go out at the true end.
+            nxt = echo_seq + len(stored)
             state = start_fin(data_seq + len(stored))
             ooo_stage = 3
             return
