@@ -834,11 +834,15 @@ static void cmd_mv(const char *arg)
  * plus an optional redirection target. Separators are spaces
  * and tabs (runs collapse; leading/trailing ignored for the
  * token structure). '|' and '>' are operator tokens even when
- * adjacent to words. There is no quoting or escaping: a quote
- * character is ordinary, and '|' / '>' anywhere on the line is
- * an operator; '<', ';' and '&' are ordinary characters.
- * Pipelines and redirection are parsed but NOT executed yet:
- * a valid line using them reports PARSE_UNSUPPORTED. The
+ * adjacent to words. Quoting (Phase 16 inc.4): a ' or "
+ * region may open anywhere in a word; inside a region,
+ * separators do not split and '|' / '>' are word characters.
+ * Token slices stay RAW (quote characters included); cooking
+ * happens in expand_str, driven by the same qstep state
+ * machine, so the two cannot disagree. A line that ends
+ * inside a region is the parse error "unterminated quote".
+ * There is no escaping: a backslash is ordinary, and '<',
+ * ';' and '&' are ordinary characters. The
  * grammar follows POSIX placement: the word after '>' is the
  * target and other words stay arguments of their stage.
  * Arrays are sized to the 255-char line, so no line can
@@ -919,31 +923,57 @@ static int var_find(const char *name, long len)
  * inside a builtin: see the contract on dispatch_command. */
 static int last_status;
 
-/* Expand $NAME and ${NAME} from the store into out (cap
- * bytes including the NUL), in ONE pass over the input:
- * substituted text is written straight to out and never
- * re-scanned, so a stored value containing '$', '|' or '>'
- * is inert data. Undefined names expand to nothing. '$?'
- * expands to the last executed line's status ('0' or '1')
- * and counts as a consumed reference. '$$'
- * passes through as a unit (a special for a later step, like
- * '$?' and '$1', which stay literal because the character
- * after the '$' cannot start a name). A '$' before any other
- * character, or at the end, is a literal '$'. *did is set
- * when any reference was consumed, even one that expanded
- * to nothing. Returns 0, -1 (bad substitution: '${' with no
- * '}' or an invalid name inside braces), or -2 (the result
+/* One quote state machine for the whole shell (Phase 16
+ * inc.4): the parser's scanner uses it to find word
+ * boundaries and expand_str uses it to cook words, so the
+ * two can never disagree about what is quoted. *qs is 0
+ * outside quotes, or the opening quote character inside a
+ * region. Returns 1 when c is a quote delimiter in the
+ * current state (an opener outside quotes, the matching
+ * closer inside) and updates *qs; any other character
+ * returns 0. Inside single quotes only ' delimits; inside
+ * double quotes only " does. */
+static int qstep(int *qs, char c)
+{
+    if (*qs) {
+        if (c == *qs) { *qs = 0; return 1; }
+        return 0;
+    }
+    if (c == '\'' || c == '"') { *qs = c; return 1; }
+    return 0;
+}
+
+/* Expand and cook a raw string from a parsed line into out
+ * (cap bytes including the NUL), in ONE pass over the
+ * input: $NAME / ${NAME} / $? substitute from the store
+ * (undefined names expand to nothing) and quote regions
+ * are honoured -- inside single quotes everything is
+ * literal, inside double quotes substitution still
+ * applies, and quote delimiters are dropped. Substituted
+ * text is written straight to out and never re-scanned,
+ * so a stored value containing '$', '|' or '>' is inert
+ * data, and quoting on the line never carries into a
+ * value. '$$' passes through as a unit (a special for a
+ * later step, like '$1', which stays literal because the
+ * character after the '$' cannot start a name). A '$'
+ * before any other character, or at the end, is a literal
+ * '$'. A backslash is an ordinary character throughout.
+ * The ${...} scan never consults quote state. Returns 0,
+ * -1 (bad substitution: '${' with no '}' or an invalid
+ * name inside braces; also an unbalanced quote tail,
+ * which a parsed line cannot produce), or -2 (the result
  * would exceed cap). The scan continues after an overflow,
  * so a bad substitution later in the string still wins:
  * badness is a property of the input text alone. */
-static int expand_str(const char *in, char *out, long cap, int *did)
+static int expand_str(const char *in, char *out, long cap)
 {
     long o = 0;
     int bad = 0, toolong = 0;
-    *did = 0;
+    int qs = 0;
     for (long i = 0; in[i]; ) {
         char c = in[i];
-        if (c != '$') {
+        if (c != '$' || qs == '\'') {
+            if (qstep(&qs, c)) { i++; continue; }
             if (o < cap - 1) out[o++] = c; else toolong = 1;
             i++;
             continue;
@@ -958,7 +988,6 @@ static int expand_str(const char *in, char *out, long cap, int *did)
         if (n == '?') {
             if (o < cap - 1) out[o++] = last_status ? '1' : '0';
             else toolong = 1;
-            *did = 1;
             i += 2;
             continue;
         }
@@ -983,7 +1012,6 @@ static int expand_str(const char *in, char *out, long cap, int *did)
                     j++;
                 ns = in + i + 1; nl = j - (i + 1); adv = j - i;
             }
-            *did = 1;
             int at = var_find(ns, nl);
             if (at >= 0) {
                 const char *v = vars[at].value;
@@ -999,15 +1027,19 @@ static int expand_str(const char *in, char *out, long cap, int *did)
         i++;
     }
     out[o] = '\0';
+    if (qs) bad = 1;
     if (bad) return -1;
     if (toolong) return -2;
     return 0;
 }
 
-static int str_has_dollar(const char *s)
+/* A raw string needs the expansion path when it contains a
+ * '$' or a quote character; anything else takes the legacy
+ * capped copy byte-for-byte, exactly as before quoting. */
+static int str_needs_expand(const char *s)
 {
     for (long i = 0; s[i]; i++)
-        if (s[i] == '$') return 1;
+        if (s[i] == '$' || s[i] == '\'' || s[i] == '"') return 1;
     return 0;
 }
 
@@ -1038,9 +1070,8 @@ static int var_try_assign(const char *w)
      * itself, and either failure stores nothing. */
     char ebuf[VAR_VALUE_MAX + 1];
     const char *store_val = val;
-    if (str_has_dollar(val)) {
-        int did = 0;
-        int st = expand_str(val, ebuf, VAR_VALUE_MAX + 1, &did);
+    if (str_needs_expand(val)) {
+        int st = expand_str(val, ebuf, VAR_VALUE_MAX + 1);
         if (st == -1) {
             puts_u("shell: bad substitution\r\n");
             return 2;
@@ -1096,9 +1127,18 @@ static int shell_parse(const char *line)
             ntok_g++; i++; continue;
         }
         int st = i;
-        while (tokbuf[i] && tokbuf[i] != ' ' && tokbuf[i] != '\t' &&
-               tokbuf[i] != '|' && tokbuf[i] != '>')
+        int qs = 0;
+        while (tokbuf[i]) {
+            char c = tokbuf[i];
+            if (!qs && (c == ' ' || c == '\t' || c == '|' || c == '>'))
+                break;
+            qstep(&qs, c);
             i++;
+        }
+        if (qs) {
+            parse_err = "unterminated quote";
+            return PARSE_ERROR;
+        }
         char d = tokbuf[i];
         tokbuf[i] = '\0';
         tok_kind[ntok_g] = TOK_WORD;
@@ -1169,9 +1209,12 @@ static int shell_parse(const char *line)
  * '>' sits between argument words (POSIX placement), the
  * span is two raw segments joined with one space, the first
  * segment's trailing separators stripped. Inner spacing is
- * raw, so write's free text keeps its double spaces. With
- * no quoting in the lexer, a word's raw end is exactly
- * start + its length. */
+ * raw, so write's free text keeps its double spaces. A
+ * word's raw end is exactly start + its raw length, quote
+ * characters included (Phase 16 inc.4): every token is
+ * quote-balanced and the join point sits between tokens,
+ * so no quoted region can span it; cooking the joined
+ * text is expand_str's job, downstream. */
 static void build_stage_arg(int w0, int wargc, const char *line,
                             char *arg, int cap)
 {
@@ -1241,12 +1284,12 @@ static int is_session_cmd(const char *nm)
            streq(nm, "pf");
 }
 
-static int stage_has_dollar(int stage)
+static int stage_needs_expand(int stage)
 {
     int aoff = 0;
     for (int s = 0; s < stage; s++) aoff += stg_argc[s] + 1;
     for (int k = 0; k < stg_argc[stage]; k++)
-        if (str_has_dollar(stg_argv[aoff + k])) return 1;
+        if (str_needs_expand(stg_argv[aoff + k])) return 1;
     return 0;
 }
 
@@ -1296,20 +1339,18 @@ static int run_pipeline(const char *line)
         int aoff = 0, woff = 0, xerr = 0;
         for (int s = 0; s < nstages_g; s++) {
             const char *w = stg_argv[aoff];
-            if (str_has_dollar(w)) {
-                int did = 0;
-                int st = expand_str(w, exp_cmd[s], 64, &did);
+            if (str_needs_expand(w)) {
+                int st = expand_str(w, exp_cmd[s], 64);
                 if (st && (!xerr || st == -1)) xerr = st;
             } else {
                 int ci = 0;
                 while (w[ci] && ci < 63) { exp_cmd[s][ci] = w[ci]; ci++; }
                 exp_cmd[s][ci] = '\0';
             }
-            if (stage_has_dollar(s)) {
+            if (stage_needs_expand(s)) {
                 char raw[256];
                 build_stage_arg(woff, stg_argc[s], line, raw, 255);
-                int did = 0;
-                int st = expand_str(raw, exp_arg[s], 192, &did);
+                int st = expand_str(raw, exp_arg[s], 192);
                 if (st && (!xerr || st == -1)) xerr = st;
             } else {
                 build_stage_arg(woff, stg_argc[s], line, exp_arg[s], 191);
@@ -1483,12 +1524,11 @@ static int execute_line(char *line, long n)
      * on length); run_pipeline expands per stage itself. */
     char cmd[64], arg[192];
     char tbuf[256];
-    int cmd_did = 0;
+    int cmd_exp = 0;
     {
         int xerr = 0;
-        if (redirect_g && str_has_dollar(redirect_g)) {
-            int did = 0;
-            int st = expand_str(redirect_g, tbuf, 256, &did);
+        if (redirect_g && str_needs_expand(redirect_g)) {
+            int st = expand_str(redirect_g, tbuf, 256);
             if (st) xerr = st;
             else if (!tbuf[0]) {
                 puts_u("shell: empty redirect target\r\n");
@@ -1497,8 +1537,9 @@ static int execute_line(char *line, long n)
             } else redirect_g = tbuf;
         }
         const char *w = stg_argv[0];
-        if (str_has_dollar(w)) {
-            int st = expand_str(w, cmd, 64, &cmd_did);
+        if (str_needs_expand(w)) {
+            cmd_exp = 1;
+            int st = expand_str(w, cmd, 64);
             if (st && (!xerr || st == -1)) xerr = st;
         } else {
             int ci = 0;
@@ -1507,7 +1548,7 @@ static int execute_line(char *line, long n)
         }
         if (xerr) { expand_fail(xerr); last_status = 1; return 0; }
     }
-    if (cmd_did && !cmd[0]) {
+    if (cmd_exp && !cmd[0]) {
         puts_u("shell: empty command\r\n");
         last_status = 1;
         return 0;
@@ -1531,12 +1572,11 @@ static int execute_line(char *line, long n)
      * a '$' anywhere in the stage's words makes the raw text
      * be built uncapped (255) and expanded into arg, for the
      * same never-cut-a-reference reason as cmd. */
-    int arg_did = 0;
     if (redirect_g) {
-        if (stage_has_dollar(0)) {
+        if (stage_needs_expand(0)) {
             char raw[256];
             build_stage_arg(0, stg_argc[0], line, raw, 255);
-            int st = expand_str(raw, arg, 192, &arg_did);
+            int st = expand_str(raw, arg, 192);
             if (st) { expand_fail(st); last_status = 1; return 0; }
         } else {
             build_stage_arg(0, stg_argc[0], line, arg, 191);
@@ -1544,8 +1584,8 @@ static int execute_line(char *line, long n)
     } else {
         const char *a = (ntok_g > 1) ? line + tok_start[1]
                                      : line + n;
-        if (str_has_dollar(a)) {
-            int st = expand_str(a, arg, 192, &arg_did);
+        if (str_needs_expand(a)) {
+            int st = expand_str(a, arg, 192);
             if (st) { expand_fail(st); last_status = 1; return 0; }
         } else {
             int ai = 0;
@@ -1594,18 +1634,17 @@ static int execute_line(char *line, long n)
         redir_restore();
         return -1;
     }
-    if (cmd_did || arg_did) {
-        /* The echo fallback must show the expanded text. The
+    if (str_needs_expand(line)) {
+        /* The echo fallback must show the cooked text. The
          * whole line is expanded (a plain line has no
          * operators, and its pieces already expanded cleanly
          * into tighter caps, so this cannot fail); the
          * original spacing is preserved. 512 bytes provably
          * suffice: expanded cmd <= 63, expanded arg <= 191,
          * and the separators between them are bounded by the
-         * 255-char line. */
+         * 255-char line; cooking only ever removes bytes. */
         char xline[512];
-        int did2 = 0;
-        expand_str(line, xline, 512, &did2);
+        expand_str(line, xline, 512);
         /* Dispatch-entry reset (see the contract on
          * dispatch_command): AFTER every expansion of this
          * line has read the old status -- the fallback line
