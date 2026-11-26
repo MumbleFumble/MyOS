@@ -1,5 +1,6 @@
 #include "../src/lib/syscall.h"
 #include "../src/lib/malloc.h"
+#include "glob.h"
 
 static long slen(const char *s) {
     long n = 0; while (s[n]) n++; return n;
@@ -964,8 +965,15 @@ static int qstep(int *qs, char c)
  * which a parsed line cannot produce), or -2 (the result
  * would exceed cap). The scan continues after an overflow,
  * so a bad substitution later in the string still wins:
- * badness is a property of the input text alone. */
-static int expand_str(const char *in, char *out, long cap)
+ * badness is a property of the input text alone.
+ * mask, when non-NULL, receives one byte per output
+ * character (Phase 16 inc.5): 1 when the character is
+ * glob-eligible -- copied from unquoted input, or produced
+ * by a substitution whose reference appeared in unquoted
+ * text -- and 0 when it came from quoted text or a quoted
+ * expansion. Callers that never glob pass NULL. */
+static int expand_str(const char *in, char *out, long cap,
+                      unsigned char *mask)
 {
     long o = 0;
     int bad = 0, toolong = 0;
@@ -974,19 +982,31 @@ static int expand_str(const char *in, char *out, long cap)
         char c = in[i];
         if (c != '$' || qs == '\'') {
             if (qstep(&qs, c)) { i++; continue; }
-            if (o < cap - 1) out[o++] = c; else toolong = 1;
+            if (o < cap - 1) {
+                out[o] = c;
+                if (mask) mask[o] = (unsigned char)(qs == 0);
+                o++;
+            } else toolong = 1;
             i++;
             continue;
         }
         char n = in[i + 1];
         if (n == '$') {
-            if (o < cap - 2) { out[o++] = '$'; out[o++] = '$'; }
+            if (o < cap - 2) {
+                int e = (qs == 0);
+                out[o] = '$'; if (mask) mask[o] = (unsigned char)e; o++;
+                out[o] = '$'; if (mask) mask[o] = (unsigned char)e; o++;
+            }
             else toolong = 1;
             i += 2;
             continue;
         }
         if (n == '?') {
-            if (o < cap - 1) out[o++] = last_status ? '1' : '0';
+            if (o < cap - 1) {
+                out[o] = last_status ? '1' : '0';
+                if (mask) mask[o] = (unsigned char)(qs == 0);
+                o++;
+            }
             else toolong = 1;
             i += 2;
             continue;
@@ -1015,15 +1035,24 @@ static int expand_str(const char *in, char *out, long cap)
             int at = var_find(ns, nl);
             if (at >= 0) {
                 const char *v = vars[at].value;
+                int ve = (qs == 0);
                 for (long k = 0; v[k]; k++) {
-                    if (o < cap - 1) out[o++] = v[k];
+                    if (o < cap - 1) {
+                        out[o] = v[k];
+                        if (mask) mask[o] = (unsigned char)ve;
+                        o++;
+                    }
                     else toolong = 1;
                 }
             }
             i += adv;
             continue;
         }
-        if (o < cap - 1) out[o++] = '$'; else toolong = 1;
+        if (o < cap - 1) {
+            out[o] = '$';
+            if (mask) mask[o] = (unsigned char)(qs == 0);
+            o++;
+        } else toolong = 1;
         i++;
     }
     out[o] = '\0';
@@ -1071,7 +1100,7 @@ static int var_try_assign(const char *w)
     char ebuf[VAR_VALUE_MAX + 1];
     const char *store_val = val;
     if (str_needs_expand(val)) {
-        int st = expand_str(val, ebuf, VAR_VALUE_MAX + 1);
+        int st = expand_str(val, ebuf, VAR_VALUE_MAX + 1, 0);
         if (st == -1) {
             puts_u("shell: bad substitution\r\n");
             return 2;
@@ -1293,6 +1322,169 @@ static int stage_needs_expand(int stage)
     return 0;
 }
 
+/* ------------------------------------------------------------------
+ * Globbing (Phase 16 inc.5), the third step of the fixed
+ * order parse -> expand -> glob -> dispatch. The matcher
+ * is glob_match() in glob.h (shared with the host test).
+ * Eligibility is per-character, from expand_str's mask: a
+ * '*', '?' or '[' globs only where its mask byte is 1
+ * (unquoted original text, or an unquoted expansion's
+ * value). Globbing is per WORD, before the flat arg string
+ * is finalised, against the same listing ls uses
+ * (sys_readdir over the flat MyFS directory). Match order
+ * is pinned SORTED (byte order), not listing order.
+ *
+ * Buffers are file-scope statics under the same discipline
+ * as exp_cmd/exp_arg: every glob result is fully consumed
+ * (copied into cmd/arg or the target) before dispatch, so
+ * a nested execute_line (via run) can never observe a
+ * half-used store. glob_collect clobbers glob_store on
+ * every call BY DESIGN: callers consume a list completely
+ * before collecting again (the command word's extra
+ * matches are copied OUT to glob_extras before any
+ * argument word is collected).
+ * ------------------------------------------------------------------ */
+#define GLOB_MAX 64   /* == DISKFS_MAX_FILES: the whole directory */
+static char glob_store[GLOB_MAX][64];
+static char glob_extras[GLOB_MAX - 1][64];
+static int glob_extras_n;
+static char gwbuf[256];
+static unsigned char gwmask[256];
+static char grbuf[256];
+
+static int gstrcmp(const char *a, const char *b)
+{
+    long i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return (unsigned char)a[i] - (unsigned char)b[i];
+}
+
+static void gcopy(char *dst, const char *srcw)
+{
+    int i = 0;
+    while (srcw[i]) { dst[i] = srcw[i]; i++; }
+    dst[i] = '\0';
+}
+
+/* Collect the sorted matches for a cooked word + mask into
+ * glob_store. Returns the count, or -1 if the matches
+ * exceed the store (impossible against a 64-file
+ * directory; the caller turns it into the too-long error
+ * rather than dropping a match silently). */
+static int glob_collect(const char *pat, const unsigned char *mask)
+{
+    int n = 0;
+    char name[64];
+    long idx = 0;
+    while (sys_readdir(idx, name) == 0) {
+        idx++;
+        if (!glob_match(pat, mask, name)) continue;
+        if (n >= GLOB_MAX) return -1;
+        gcopy(glob_store[n], name);
+        n++;
+    }
+    for (int i = 1; i < n; i++) {
+        char tmp[64];
+        gcopy(tmp, glob_store[i]);
+        int j = i - 1;
+        while (j >= 0 && gstrcmp(glob_store[j], tmp) > 0) {
+            gcopy(glob_store[j + 1], glob_store[j]);
+            j--;
+        }
+        gcopy(glob_store[j + 1], tmp);
+    }
+    return n;
+}
+
+static int glob_candidate(const char *w, const unsigned char *mask)
+{
+    for (long i = 0; w[i]; i++)
+        if (mask[i] && (w[i] == '*' || w[i] == '?' || w[i] == '['))
+            return 1;
+    return 0;
+}
+
+/* Glob one stage's command word (w = its raw word). On one
+ * or more matches, cmd becomes the first and the rest are
+ * copied to glob_extras for glob_arg_part. Returns -1 on
+ * store overflow, else 0. A cooking failure cannot happen
+ * (the word already expanded once); it is treated as
+ * no-glob defensively. */
+static int glob_cmd_part(const char *w, char *cmd)
+{
+    glob_extras_n = 0;
+    if (expand_str(w, gwbuf, 256, gwmask) != 0) return 0;
+    if (!glob_candidate(gwbuf, gwmask)) return 0;
+    int n = glob_collect(gwbuf, gwmask);
+    if (n < 0) return -1;
+    if (n == 0) return 0;
+    gcopy(cmd, glob_store[0]);
+    for (int i = 1; i < n; i++)
+        gcopy(glob_extras[glob_extras_n++], glob_store[i]);
+    return 0;
+}
+
+static void gr_append(const char *s, int *first, int *overflow)
+{
+    long len = slen_u(grbuf);
+    if (!*first) {
+        if (len < 191) grbuf[len++] = ' ';
+        else *overflow = 1;
+        grbuf[len] = '\0';
+    }
+    *first = 0;
+    for (long i = 0; s[i]; i++) {
+        if (len < 191) grbuf[len++] = s[i];
+        else *overflow = 1;
+    }
+    grbuf[len] = '\0';
+}
+
+/* Glob one stage's argument words into arg (the phase-one
+ * string, cap 192). The command extras (glob_cmd_part)
+ * prepend. If nothing matched, or the rebuilt arg equals
+ * the phase-one arg (a no-op glob, e.g. a pattern whose
+ * only match is its own literal name), arg is left
+ * untouched byte-for-byte. Returns -1 when something
+ * matched but the rebuilt arg would exceed the cap: the
+ * caller raises "shell: expansion too long" and dispatches
+ * nothing (never a silently truncated match list). */
+static int glob_arg_part(int stage, char *arg)
+{
+    int aoff = 0;
+    for (int s = 0; s < stage; s++) aoff += stg_argc[s] + 1;
+    int any = glob_extras_n > 0;
+    int overflow = 0, first = 1;
+    grbuf[0] = '\0';
+    for (int i = 0; i < glob_extras_n; i++)
+        gr_append(glob_extras[i], &first, &overflow);
+    for (int k = 1; k < stg_argc[stage]; k++) {
+        const char *w = stg_argv[aoff + k];
+        if (expand_str(w, gwbuf, 256, gwmask) != 0) {
+            gr_append(w, &first, &overflow);
+            continue;
+        }
+        if (!glob_candidate(gwbuf, gwmask)) {
+            gr_append(gwbuf, &first, &overflow);
+            continue;
+        }
+        int n = glob_collect(gwbuf, gwmask);
+        if (n < 0) return -1;
+        if (n == 0) {
+            gr_append(gwbuf, &first, &overflow);
+            continue;
+        }
+        any = 1;
+        for (int i = 0; i < n; i++)
+            gr_append(glob_store[i], &first, &overflow);
+    }
+    if (!any) return 0;
+    if (overflow) return -1;
+    if (streq(grbuf, arg)) return 0;
+    gcopy(arg, grbuf);
+    return 0;
+}
+
 static void expand_fail(int st)
 {
     if (st == -1) puts_u("shell: bad substitution\r\n");
@@ -1340,7 +1532,7 @@ static int run_pipeline(const char *line)
         for (int s = 0; s < nstages_g; s++) {
             const char *w = stg_argv[aoff];
             if (str_needs_expand(w)) {
-                int st = expand_str(w, exp_cmd[s], 64);
+                int st = expand_str(w, exp_cmd[s], 64, 0);
                 if (st && (!xerr || st == -1)) xerr = st;
             } else {
                 int ci = 0;
@@ -1350,10 +1542,17 @@ static int run_pipeline(const char *line)
             if (stage_needs_expand(s)) {
                 char raw[256];
                 build_stage_arg(woff, stg_argc[s], line, raw, 255);
-                int st = expand_str(raw, exp_arg[s], 192);
+                int st = expand_str(raw, exp_arg[s], 192, 0);
                 if (st && (!xerr || st == -1)) xerr = st;
             } else {
                 build_stage_arg(woff, stg_argc[s], line, exp_arg[s], 191);
+            }
+            /* Glob this stage (inc.5) before the refusal
+             * checks below read its name: cmd first match,
+             * extras prepend its arg words. */
+            if (glob_cmd_part(w, exp_cmd[s]) < 0 ||
+                glob_arg_part(s, exp_arg[s]) < 0) {
+                if (!xerr) xerr = -2;
             }
             aoff += stg_argc[s] + 1;
             woff += stg_argc[s];
@@ -1524,22 +1723,55 @@ static int execute_line(char *line, long n)
      * on length); run_pipeline expands per stage itself. */
     char cmd[64], arg[192];
     char tbuf[256];
+    unsigned char tmask[256];
     int cmd_exp = 0;
     {
         int xerr = 0;
-        if (redirect_g && str_needs_expand(redirect_g)) {
-            int st = expand_str(redirect_g, tbuf, 256);
-            if (st) xerr = st;
-            else if (!tbuf[0]) {
-                puts_u("shell: empty redirect target\r\n");
-                last_status = 1;
-                return 0;
-            } else redirect_g = tbuf;
+        if (redirect_g) {
+            /* Cook the target into tbuf/tmask: through
+             * expand_str when it needs expansion, else the
+             * raw word with an all-eligible mask -- globbing
+             * (inc.5) applies either way. */
+            int tst = 0;
+            if (str_needs_expand(redirect_g)) {
+                tst = expand_str(redirect_g, tbuf, 256, tmask);
+                if (tst) xerr = tst;
+                else if (!tbuf[0]) {
+                    puts_u("shell: empty redirect target\r\n");
+                    last_status = 1;
+                    return 0;
+                }
+            } else {
+                int ti = 0;
+                while (redirect_g[ti] && ti < 255) {
+                    tbuf[ti] = redirect_g[ti];
+                    tmask[ti] = 1;
+                    ti++;
+                }
+                tbuf[ti] = '\0';
+            }
+            if (!tst) {
+                /* Glob the target: exactly one match replaces
+                 * it; zero leave it literal; more than one is
+                 * an ambiguous redirect -- no file created,
+                 * nothing dispatched. */
+                if (glob_candidate(tbuf, tmask)) {
+                    int gn = glob_collect(tbuf, tmask);
+                    if (gn < 0) xerr = -2;
+                    else if (gn > 1) {
+                        puts_u("shell: ambiguous redirect\r\n");
+                        last_status = 1;
+                        return 0;
+                    }
+                    else if (gn == 1) gcopy(tbuf, glob_store[0]);
+                }
+                if (!xerr) redirect_g = tbuf;
+            }
         }
         const char *w = stg_argv[0];
         if (str_needs_expand(w)) {
             cmd_exp = 1;
-            int st = expand_str(w, cmd, 64);
+            int st = expand_str(w, cmd, 64, 0);
             if (st && (!xerr || st == -1)) xerr = st;
         } else {
             int ci = 0;
@@ -1547,6 +1779,16 @@ static int execute_line(char *line, long n)
             cmd[ci] = '\0';
         }
         if (xerr) { expand_fail(xerr); last_status = 1; return 0; }
+    }
+    /* Glob the command word (inc.5), single-stage lines
+     * only -- pipelines glob per stage in run_pipeline. The
+     * session-command check below and dispatch both read
+     * the globbed name; extra matches wait in glob_extras
+     * for the arg pass. */
+    if (nstages_g == 1 && glob_cmd_part(stg_argv[0], cmd) < 0) {
+        expand_fail(-2);
+        last_status = 1;
+        return 0;
     }
     if (cmd_exp && !cmd[0]) {
         puts_u("shell: empty command\r\n");
@@ -1576,7 +1818,7 @@ static int execute_line(char *line, long n)
         if (stage_needs_expand(0)) {
             char raw[256];
             build_stage_arg(0, stg_argc[0], line, raw, 255);
-            int st = expand_str(raw, arg, 192);
+            int st = expand_str(raw, arg, 192, 0);
             if (st) { expand_fail(st); last_status = 1; return 0; }
         } else {
             build_stage_arg(0, stg_argc[0], line, arg, 191);
@@ -1585,13 +1827,21 @@ static int execute_line(char *line, long n)
         const char *a = (ntok_g > 1) ? line + tok_start[1]
                                      : line + n;
         if (str_needs_expand(a)) {
-            int st = expand_str(a, arg, 192);
+            int st = expand_str(a, arg, 192, 0);
             if (st) { expand_fail(st); last_status = 1; return 0; }
         } else {
             int ai = 0;
             while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
             arg[ai] = '\0';
         }
+    }
+    /* Glob the argument words (inc.5): per word, after
+     * expansion, before dispatch -- and before the redirect
+     * branch creates the target file. */
+    if (glob_arg_part(0, arg) < 0) {
+        expand_fail(-2);
+        last_status = 1;
+        return 0;
     }
     if (redirect_g) {
         if (streq(cmd, "exec")) {
@@ -1644,7 +1894,7 @@ static int execute_line(char *line, long n)
          * and the separators between them are bounded by the
          * 255-char line; cooking only ever removes bytes. */
         char xline[512];
-        expand_str(line, xline, 512);
+        expand_str(line, xline, 512, 0);
         /* Dispatch-entry reset (see the contract on
          * dispatch_command): AFTER every expansion of this
          * line has read the old status -- the fallback line
