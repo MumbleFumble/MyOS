@@ -913,6 +913,89 @@ static int var_find(const char *name, long len)
     return -1;
 }
 
+/* Expand $NAME and ${NAME} from the store into out (cap
+ * bytes including the NUL), in ONE pass over the input:
+ * substituted text is written straight to out and never
+ * re-scanned, so a stored value containing '$', '|' or '>'
+ * is inert data. Undefined names expand to nothing. '$$'
+ * passes through as a unit (a special for a later step, like
+ * '$?' and '$1', which stay literal because the character
+ * after the '$' cannot start a name). A '$' before any other
+ * character, or at the end, is a literal '$'. *did is set
+ * when any reference was consumed, even one that expanded
+ * to nothing. Returns 0, -1 (bad substitution: '${' with no
+ * '}' or an invalid name inside braces), or -2 (the result
+ * would exceed cap). The scan continues after an overflow,
+ * so a bad substitution later in the string still wins:
+ * badness is a property of the input text alone. */
+static int expand_str(const char *in, char *out, long cap, int *did)
+{
+    long o = 0;
+    int bad = 0, toolong = 0;
+    *did = 0;
+    for (long i = 0; in[i]; ) {
+        char c = in[i];
+        if (c != '$') {
+            if (o < cap - 1) out[o++] = c; else toolong = 1;
+            i++;
+            continue;
+        }
+        char n = in[i + 1];
+        if (n == '$') {
+            if (o < cap - 2) { out[o++] = '$'; out[o++] = '$'; }
+            else toolong = 1;
+            i += 2;
+            continue;
+        }
+        if (n == '{' || (n >= 'A' && n <= 'Z') || (n >= 'a' && n <= 'z')
+            || n == '_') {
+            const char *ns;
+            long nl, adv;
+            if (n == '{') {
+                long j = i + 2;
+                while (in[j] && in[j] != '}') j++;
+                if (!in[j] || !var_name_ok(in + i + 2, j - (i + 2))) {
+                    bad = 1;
+                    i = in[j] ? j + 1 : j;
+                    continue;
+                }
+                ns = in + i + 2; nl = j - (i + 2); adv = j + 1 - i;
+            } else {
+                long j = i + 1;
+                while ((in[j] >= 'A' && in[j] <= 'Z')
+                       || (in[j] >= 'a' && in[j] <= 'z')
+                       || (in[j] >= '0' && in[j] <= '9') || in[j] == '_')
+                    j++;
+                ns = in + i + 1; nl = j - (i + 1); adv = j - i;
+            }
+            *did = 1;
+            int at = var_find(ns, nl);
+            if (at >= 0) {
+                const char *v = vars[at].value;
+                for (long k = 0; v[k]; k++) {
+                    if (o < cap - 1) out[o++] = v[k];
+                    else toolong = 1;
+                }
+            }
+            i += adv;
+            continue;
+        }
+        if (o < cap - 1) out[o++] = '$'; else toolong = 1;
+        i++;
+    }
+    out[o] = '\0';
+    if (bad) return -1;
+    if (toolong) return -2;
+    return 0;
+}
+
+static int str_has_dollar(const char *s)
+{
+    for (long i = 0; s[i]; i++)
+        if (s[i] == '$') return 1;
+    return 0;
+}
+
 /* Try to perform the assignment in the single word w (already
  * known to be a whole line's only word). Returns 1 if w was an
  * assignment line (performed, or refused with a named error),
@@ -926,15 +1009,39 @@ static int var_try_assign(const char *w)
         if (w[i] == '=') { eq = i; break; }
     if (eq < 0 || !var_name_ok(w, eq)) return 0;
     const char *val = w + eq + 1;
-    long vlen = 0;
-    while (val[vlen]) vlen++;
     if (eq > VAR_NAME_MAX) {
         puts_u("shell: variable name too long\r\n");
         return 1;
     }
-    if (vlen > VAR_VALUE_MAX) {
-        puts_u("shell: variable value too long\r\n");
-        return 1;
+    /* The NAME portion never expands. The value expands
+     * against the CURRENT store before storing (inc.2), so
+     * X=$Y copies Y's present value. A '$'-free value takes
+     * the inc.1 raw length check; a '$' value is expanded
+     * first (its raw length says nothing about the result),
+     * and the expanded text must fit the same value cap —
+     * an overflow names that cap, a bad substitution names
+     * itself, and either failure stores nothing. */
+    char ebuf[VAR_VALUE_MAX + 1];
+    const char *store_val = val;
+    if (str_has_dollar(val)) {
+        int did = 0;
+        int st = expand_str(val, ebuf, VAR_VALUE_MAX + 1, &did);
+        if (st == -1) {
+            puts_u("shell: bad substitution\r\n");
+            return 1;
+        }
+        if (st == -2) {
+            puts_u("shell: variable value too long\r\n");
+            return 1;
+        }
+        store_val = ebuf;
+    } else {
+        long vlen = 0;
+        while (val[vlen]) vlen++;
+        if (vlen > VAR_VALUE_MAX) {
+            puts_u("shell: variable value too long\r\n");
+            return 1;
+        }
     }
     int at = var_find(w, eq);
     if (at < 0) {
@@ -946,8 +1053,9 @@ static int var_try_assign(const char *w)
         for (long i = 0; i < eq; i++) vars[at].name[i] = w[i];
         vars[at].name[eq] = '\0';
     }
-    for (long i = 0; i < vlen; i++) vars[at].value[i] = val[i];
-    vars[at].value[vlen] = '\0';
+    long si = 0;
+    while (store_val[si]) { vars[at].value[si] = store_val[si]; si++; }
+    vars[at].value[si] = '\0';
     return 1;
 }
 
@@ -1050,7 +1158,7 @@ static int shell_parse(const char *line)
  * no quoting in the lexer, a word's raw end is exactly
  * start + its length. */
 static void build_stage_arg(int w0, int wargc, const char *line,
-                            char *arg)
+                            char *arg, int cap)
 {
     int ai = 0;
     if (wargc >= 2) {
@@ -1064,16 +1172,16 @@ static void build_stage_arg(int w0, int wargc, const char *line,
             }
         }
         if (split < 0) {
-            for (int q = tok_start[first]; q < last_end && ai < 191; q++)
+            for (int q = tok_start[first]; q < last_end && ai < cap; q++)
                 arg[ai++] = line[q];
         } else {
             int e1 = tok_start[gt_tok];
             while (e1 > tok_start[first] &&
                    (line[e1-1] == ' ' || line[e1-1] == '\t')) e1--;
-            for (int q = tok_start[first]; q < e1 && ai < 191; q++)
+            for (int q = tok_start[first]; q < e1 && ai < cap; q++)
                 arg[ai++] = line[q];
-            if (ai && ai < 191) arg[ai++] = ' ';
-            for (int q = tok_start[split]; q < last_end && ai < 191; q++)
+            if (ai && ai < cap) arg[ai++] = ' ';
+            for (int q = tok_start[split]; q < last_end && ai < cap; q++)
                 arg[ai++] = line[q];
         }
     }
@@ -1118,6 +1226,31 @@ static int is_session_cmd(const char *nm)
            streq(nm, "pf");
 }
 
+static int stage_has_dollar(int stage)
+{
+    int aoff = 0;
+    for (int s = 0; s < stage; s++) aoff += stg_argc[s] + 1;
+    for (int k = 0; k < stg_argc[stage]; k++)
+        if (str_has_dollar(stg_argv[aoff + k])) return 1;
+    return 0;
+}
+
+static void expand_fail(int st)
+{
+    if (st == -1) puts_u("shell: bad substitution\r\n");
+    else puts_u("shell: expansion too long\r\n");
+}
+
+/* Expanded per-stage cmd/arg, filled by run_pipeline's
+ * expansion pass before anything is dispatched and consumed
+ * by its main loop, so a stage that mutates the store (unset)
+ * cannot change a later stage's expansion — the pipeline is
+ * expanded as a whole, the way subshells would see it.
+ * run_pipeline cannot re-enter (a stage can never be `run`),
+ * so statics are safe here. */
+static char exp_cmd[128][64];
+static char exp_arg[128][192];
+
 static int run_pipeline(const char *line)
 {
     /* Pre-checks: nothing has run yet. */
@@ -1134,6 +1267,51 @@ static int run_pipeline(const char *line)
     if (redirect_g && gt_stage != nstages_g - 1) {
         puts_u("shell: redirection in a pipeline must be on the last stage\r\n");
         return 0;
+    }
+    /* Expansion pass (Phase 16 inc.2): expand every stage's
+     * cmd/arg ONCE, here — before the target is created and
+     * before anything is dispatched — and refuse session
+     * commands by their EXPANDED names (the pre-check above
+     * sees raw words; a stage $X with X=exit must not smuggle
+     * exit past it). On any error: nothing dispatched, no
+     * target created. */
+    {
+        int aoff = 0, woff = 0, xerr = 0;
+        for (int s = 0; s < nstages_g; s++) {
+            const char *w = stg_argv[aoff];
+            if (str_has_dollar(w)) {
+                int did = 0;
+                int st = expand_str(w, exp_cmd[s], 64, &did);
+                if (st && (!xerr || st == -1)) xerr = st;
+            } else {
+                int ci = 0;
+                while (w[ci] && ci < 63) { exp_cmd[s][ci] = w[ci]; ci++; }
+                exp_cmd[s][ci] = '\0';
+            }
+            if (stage_has_dollar(s)) {
+                char raw[256];
+                build_stage_arg(woff, stg_argc[s], line, raw, 255);
+                int did = 0;
+                int st = expand_str(raw, exp_arg[s], 192, &did);
+                if (st && (!xerr || st == -1)) xerr = st;
+            } else {
+                build_stage_arg(woff, stg_argc[s], line, exp_arg[s], 191);
+            }
+            aoff += stg_argc[s] + 1;
+            woff += stg_argc[s];
+        }
+        if (xerr) { expand_fail(xerr); return 0; }
+        for (int s = 0; s < nstages_g; s++) {
+            if (!exp_cmd[s][0]) {
+                puts_u("shell: empty command\r\n");
+                return 0;
+            }
+            if (is_session_cmd(exp_cmd[s]) || streq(exp_cmd[s], "run")) {
+                puts_u("shell: "); puts_u(exp_cmd[s]);
+                puts_u(" not supported in pipelines\r\n");
+                return 0;
+            }
+        }
     }
     long tfd = -1;
     if (redirect_g) {
@@ -1182,12 +1360,8 @@ static int run_pipeline(const char *line)
         } else {
             sys_dup2(sv1, 1);
         }
-        char scmd[64], sarg[192];
-        const char *w = stg_argv[aoff];
-        int ci = 0;
-        while (w[ci] && ci < 63) { scmd[ci] = w[ci]; ci++; }
-        scmd[ci] = '\0';
-        build_stage_arg(woff, stg_argc[s], line, sarg);
+        char *scmd = exp_cmd[s];
+        char *sarg = exp_arg[s];
         char rline[256];
         int ri = 0;
         for (int j = 0; scmd[j] && ri < 250; j++) rline[ri++] = scmd[j];
@@ -1264,21 +1438,45 @@ static int execute_line(char *line, long n)
         && var_try_assign(stg_argv[0]))
         return -1;
 
+    /* Expansion (Phase 16 inc.2): the redirect target and the
+     * command word expand here, before anything is created or
+     * dispatched. A '$'-free string takes the legacy capped
+     * copy byte-for-byte; a '$' string is expanded from its
+     * UNCAPPED raw source, so a cap can never cut a reference
+     * in half and silently change the line's meaning —
+     * overflow of the destination cap is a named error. arg
+     * is NOT touched yet: on a pipeline line the raw remainder
+     * spans every stage, and expanding it here would report
+     * later stages' errors in the wrong place (and false-fire
+     * on length); run_pipeline expands per stage itself. */
     char cmd[64], arg[192];
+    char tbuf[256];
+    int cmd_did = 0;
     {
-        const char *w = stg_argv[0];
-        int ci = 0;
-        while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
-        cmd[ci] = '\0';
-        if (redirect_g) {
-            build_stage_arg(0, stg_argc[0], line, arg);
-        } else {
-            const char *a = (ntok_g > 1) ? line + tok_start[1]
-                                         : line + n;
-            int ai = 0;
-            while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
-            arg[ai] = '\0';
+        int xerr = 0;
+        if (redirect_g && str_has_dollar(redirect_g)) {
+            int did = 0;
+            int st = expand_str(redirect_g, tbuf, 256, &did);
+            if (st) xerr = st;
+            else if (!tbuf[0]) {
+                puts_u("shell: empty redirect target\r\n");
+                return 0;
+            } else redirect_g = tbuf;
         }
+        const char *w = stg_argv[0];
+        if (str_has_dollar(w)) {
+            int st = expand_str(w, cmd, 64, &cmd_did);
+            if (st && (!xerr || st == -1)) xerr = st;
+        } else {
+            int ci = 0;
+            while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
+            cmd[ci] = '\0';
+        }
+        if (xerr) { expand_fail(xerr); return 0; }
+    }
+    if (cmd_did && !cmd[0]) {
+        puts_u("shell: empty command\r\n");
+        return 0;
     }
 
     /* Inside a script, the session commands are refused:
@@ -1293,6 +1491,33 @@ static int execute_line(char *line, long n)
     }
 
     if (nstages_g > 1) return run_pipeline(line);
+
+    /* Single-stage arg, built exactly as before — except that
+     * a '$' anywhere in the stage's words makes the raw text
+     * be built uncapped (255) and expanded into arg, for the
+     * same never-cut-a-reference reason as cmd. */
+    int arg_did = 0;
+    if (redirect_g) {
+        if (stage_has_dollar(0)) {
+            char raw[256];
+            build_stage_arg(0, stg_argc[0], line, raw, 255);
+            int st = expand_str(raw, arg, 192, &arg_did);
+            if (st) { expand_fail(st); return 0; }
+        } else {
+            build_stage_arg(0, stg_argc[0], line, arg, 191);
+        }
+    } else {
+        const char *a = (ntok_g > 1) ? line + tok_start[1]
+                                     : line + n;
+        if (str_has_dollar(a)) {
+            int st = expand_str(a, arg, 192, &arg_did);
+            if (st) { expand_fail(st); return 0; }
+        } else {
+            int ai = 0;
+            while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
+            arg[ai] = '\0';
+        }
+    }
     if (redirect_g) {
         if (streq(cmd, "exec")) {
             puts_u("shell: redirection not supported for exec\r\n");
@@ -1331,7 +1556,22 @@ static int execute_line(char *line, long n)
         redir_restore();
         return -1;
     }
-    dispatch_command(cmd, arg, line, n);
+    if (cmd_did || arg_did) {
+        /* The echo fallback must show the expanded text. The
+         * whole line is expanded (a plain line has no
+         * operators, and its pieces already expanded cleanly
+         * into tighter caps, so this cannot fail); the
+         * original spacing is preserved. 512 bytes provably
+         * suffice: expanded cmd <= 63, expanded arg <= 191,
+         * and the separators between them are bounded by the
+         * 255-char line. */
+        char xline[512];
+        int did2 = 0;
+        expand_str(line, xline, 512, &did2);
+        dispatch_command(cmd, arg, xline, (long)slen_u(xline));
+    } else {
+        dispatch_command(cmd, arg, line, n);
+    }
     return prompt_nl;
 }
 
