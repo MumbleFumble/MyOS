@@ -873,6 +873,84 @@ static long        cat_stdin_err;
 static int         run_depth;       /* active run frames (inc.8) */   /* negative stdin read recorded by bare cat (inc.7) */       /* set by dispatch_command (inc.5) */
 static long        redir_save;      /* saved console fd slot, or -1 */
 
+/* ---- shell variables (Phase 16 inc.1) ----
+ * A fixed-capacity store of name/value pairs in insertion
+ * order. This increment is the store and its mutation surface
+ * only: NO expansion anywhere yet ($NAME stays a literal word
+ * until inc.2). Limits are hard: a violation prints a named
+ * error and changes nothing (a failed reassignment leaves the
+ * old value intact) — never truncation, never overflow. */
+#define VAR_MAX       32   /* variables in the store */
+#define VAR_NAME_MAX  31   /* chars, excluding the NUL */
+#define VAR_VALUE_MAX 127  /* chars, excluding the NUL */
+static struct { char name[VAR_NAME_MAX + 1];
+                char value[VAR_VALUE_MAX + 1]; } vars[VAR_MAX];
+static int nvars;
+
+/* NAME = [A-Za-z_][A-Za-z0-9_]* over s[0..len). Length-based:
+ * the name part of an assignment word is not NUL-terminated.
+ * Shared by the assignment recogniser and unset. */
+static int var_name_ok(const char *s, long len)
+{
+    if (len < 1) return 0;
+    for (long i = 0; i < len; i++) {
+        char c = s[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || c == '_' || (i > 0 && c >= '0' && c <= '9');
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+static int var_find(const char *name, long len)
+{
+    for (int i = 0; i < nvars; i++) {
+        long j = 0;
+        while (j < len && vars[i].name[j] && vars[i].name[j] == name[j])
+            j++;
+        if (j == len && vars[i].name[j] == '\0') return i;
+    }
+    return -1;
+}
+
+/* Try to perform the assignment in the single word w (already
+ * known to be a whole line's only word). Returns 1 if w was an
+ * assignment line (performed, or refused with a named error),
+ * 0 if w is not assignment-shaped at all and the line must be
+ * dispatched as usual. Check order: name length, value length,
+ * then capacity (new names only) — all before any mutation. */
+static int var_try_assign(const char *w)
+{
+    long eq = -1;
+    for (long i = 0; w[i]; i++)
+        if (w[i] == '=') { eq = i; break; }
+    if (eq < 0 || !var_name_ok(w, eq)) return 0;
+    const char *val = w + eq + 1;
+    long vlen = 0;
+    while (val[vlen]) vlen++;
+    if (eq > VAR_NAME_MAX) {
+        puts_u("shell: variable name too long\r\n");
+        return 1;
+    }
+    if (vlen > VAR_VALUE_MAX) {
+        puts_u("shell: variable value too long\r\n");
+        return 1;
+    }
+    int at = var_find(w, eq);
+    if (at < 0) {
+        if (nvars >= VAR_MAX) {
+            puts_u("shell: too many variables\r\n");
+            return 1;
+        }
+        at = nvars++;
+        for (long i = 0; i < eq; i++) vars[at].name[i] = w[i];
+        vars[at].name[eq] = '\0';
+    }
+    for (long i = 0; i < vlen; i++) vars[at].value[i] = val[i];
+    vars[at].value[vlen] = '\0';
+    return 1;
+}
+
 static int shell_parse(const char *line)
 {
     /* Tokenise a scratch copy; the original line is kept for
@@ -1170,6 +1248,22 @@ static int execute_line(char *line, long n)
         return 0;
     }
 
+    /* Assignment lines (Phase 16 inc.1): a line that is a
+     * single NAME=value word — one stage, no redirection, one
+     * word — sets the variable and prints nothing. Recognised
+     * here, post-parse and before dispatch, so the guards are
+     * structural: X=1 | cat is a pipeline (nstages > 1) and
+     * X=1 > f is a redirect line, and neither assigns; the
+     * redirect branch and run_pipeline call dispatch_command
+     * directly and never re-enter this function, so a stage or
+     * rebuilt line can never become an assignment either.
+     * Placed before the script session-command check: exit=1
+     * is a variable, not the exit command (that check compares
+     * whole names, and this word is not one). */
+    if (nstages_g == 1 && !redirect_g && stg_argc[0] == 1
+        && var_try_assign(stg_argv[0]))
+        return -1;
+
     char cmd[64], arg[192];
     {
         const char *w = stg_argv[0];
@@ -1426,6 +1520,56 @@ static void dispatch_command(const char *cmd, const char *arg,
     }
 
     if (streq(cmd, "run")) { cmd_run(arg); return; }
+
+    if (streq(cmd, "set")) {
+        /* Phase 16 inc.1: list the store, insertion order.
+         * An argument is a named error (before today, `set`
+         * was an unknown command and hit the echo fallback).
+         * Like ls, each line ends with \r\n and the prompt
+         * follows plainly; an empty store prints nothing. */
+        if (arg[0]) {
+            puts_u("set: takes no arguments"); prompt_nl = 1;
+            return;
+        }
+        for (int i = 0; i < nvars; i++) {
+            puts_u(vars[i].name); puts_u("=");
+            puts_u(vars[i].value); puts_u("\r\n");
+        }
+        return;
+    }
+
+    if (streq(cmd, "unset")) {
+        /* Phase 16 inc.1: remove one variable. arg is the raw
+         * remainder and keeps any trailing separators (the
+         * inc.4 rule), so trailing spaces/tabs are trimmed
+         * before the name is validated; a name with inner
+         * spaces then fails validation like any bad name. */
+        char nm[192];
+        int nl = 0;
+        while (arg[nl] && nl < 191) { nm[nl] = arg[nl]; nl++; }
+        while (nl > 0 && (nm[nl - 1] == ' ' || nm[nl - 1] == '\t'))
+            nl--;
+        nm[nl] = '\0';
+        if (!nl) { puts_u("usage: unset <name>"); prompt_nl = 1; return; }
+        if (!var_name_ok(nm, nl)) {
+            puts_u("unset: invalid variable name"); prompt_nl = 1;
+            return;
+        }
+        int at = var_find(nm, nl);
+        if (at < 0) {
+            puts_u("unset: no such variable: "); puts_u(nm);
+            prompt_nl = 1;
+            return;
+        }
+        for (int i = at; i + 1 < nvars; i++) {
+            int j = 0;
+            while ((vars[i].name[j] = vars[i + 1].name[j]) != '\0') j++;
+            j = 0;
+            while ((vars[i].value[j] = vars[i + 1].value[j]) != '\0') j++;
+        }
+        nvars--;
+        return;
+    }
 
     if (streq(cmd, "cat")) {
         if (!arg[0]) {
