@@ -4,8 +4,11 @@
 # plain/braced/concatenated expansion; undefined -> empty
 # (bracket case, and the empty word keeps its place: the
 # double space in cat's not-found message); literal-$ cases
-# ($, $1, $-, $?, $@, $$ pass through untouched); expanded
-# text is never re-scanned (a stored "$INNER" stays literal);
+# ($, $1, $-, $@, $$ pass through untouched; the $? in that
+# line expands since inc.3, to 0 there: the previous line's
+# cat: not found is a builtin message, which the line-level
+# status model counts as success); expanded text is never
+# re-scanned (a stored "$INNER" stays literal);
 # assignment RHS expands against the current store, a failed
 # RHS stores nothing; pipeline stages and the redirect target
 # expand; a bad substitution anywhere dispatches NOTHING (a
@@ -169,7 +172,7 @@ check "alpha beta gamma" 4
 check "echo: frobnicate preworldpost" 1
 check "echo: frobnicate []" 1
 check "cat: not found: pre  post" 1
-check "echo: frobnicate \$ \$1 \$- \$? \$@ \$\$" 1
+check "echo: frobnicate \$ \$1 \$- 0 \$@ \$\$" 1
 check "echo: frobnicate \$INNER" 1
 check "echo: frobnicate" 5
 check "shell: bad substitution" 4

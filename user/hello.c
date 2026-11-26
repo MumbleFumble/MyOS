@@ -913,11 +913,19 @@ static int var_find(const char *name, long len)
     return -1;
 }
 
+/* Status of the last executed line (0 or 1), read by $?
+ * expansion. Written ONLY by the shell's own layers (parser,
+ * assignment, expander, executor, dispatcher), never from
+ * inside a builtin: see the contract on dispatch_command. */
+static int last_status;
+
 /* Expand $NAME and ${NAME} from the store into out (cap
  * bytes including the NUL), in ONE pass over the input:
  * substituted text is written straight to out and never
  * re-scanned, so a stored value containing '$', '|' or '>'
- * is inert data. Undefined names expand to nothing. '$$'
+ * is inert data. Undefined names expand to nothing. '$?'
+ * expands to the last executed line's status ('0' or '1')
+ * and counts as a consumed reference. '$$'
  * passes through as a unit (a special for a later step, like
  * '$?' and '$1', which stay literal because the character
  * after the '$' cannot start a name). A '$' before any other
@@ -944,6 +952,13 @@ static int expand_str(const char *in, char *out, long cap, int *did)
         if (n == '$') {
             if (o < cap - 2) { out[o++] = '$'; out[o++] = '$'; }
             else toolong = 1;
+            i += 2;
+            continue;
+        }
+        if (n == '?') {
+            if (o < cap - 1) out[o++] = last_status ? '1' : '0';
+            else toolong = 1;
+            *did = 1;
             i += 2;
             continue;
         }
@@ -1011,7 +1026,7 @@ static int var_try_assign(const char *w)
     const char *val = w + eq + 1;
     if (eq > VAR_NAME_MAX) {
         puts_u("shell: variable name too long\r\n");
-        return 1;
+        return 2;
     }
     /* The NAME portion never expands. The value expands
      * against the CURRENT store before storing (inc.2), so
@@ -1028,11 +1043,11 @@ static int var_try_assign(const char *w)
         int st = expand_str(val, ebuf, VAR_VALUE_MAX + 1, &did);
         if (st == -1) {
             puts_u("shell: bad substitution\r\n");
-            return 1;
+            return 2;
         }
         if (st == -2) {
             puts_u("shell: variable value too long\r\n");
-            return 1;
+            return 2;
         }
         store_val = ebuf;
     } else {
@@ -1040,14 +1055,14 @@ static int var_try_assign(const char *w)
         while (val[vlen]) vlen++;
         if (vlen > VAR_VALUE_MAX) {
             puts_u("shell: variable value too long\r\n");
-            return 1;
+            return 2;
         }
     }
     int at = var_find(w, eq);
     if (at < 0) {
         if (nvars >= VAR_MAX) {
             puts_u("shell: too many variables\r\n");
-            return 1;
+            return 2;
         }
         at = nvars++;
         for (long i = 0; i < eq; i++) vars[at].name[i] = w[i];
@@ -1260,12 +1275,14 @@ static int run_pipeline(const char *line)
         if (is_session_cmd(nm) || streq(nm, "run")) {
             puts_u("shell: "); puts_u(nm);
             puts_u(" not supported in pipelines\r\n");
+            last_status = 1;
             return 0;
         }
         aoff += stg_argc[s] + 1;
     }
     if (redirect_g && gt_stage != nstages_g - 1) {
         puts_u("shell: redirection in a pipeline must be on the last stage\r\n");
+        last_status = 1;
         return 0;
     }
     /* Expansion pass (Phase 16 inc.2): expand every stage's
@@ -1300,15 +1317,17 @@ static int run_pipeline(const char *line)
             aoff += stg_argc[s] + 1;
             woff += stg_argc[s];
         }
-        if (xerr) { expand_fail(xerr); return 0; }
+        if (xerr) { expand_fail(xerr); last_status = 1; return 0; }
         for (int s = 0; s < nstages_g; s++) {
             if (!exp_cmd[s][0]) {
                 puts_u("shell: empty command\r\n");
+                last_status = 1;
                 return 0;
             }
             if (is_session_cmd(exp_cmd[s]) || streq(exp_cmd[s], "run")) {
                 puts_u("shell: "); puts_u(exp_cmd[s]);
                 puts_u(" not supported in pipelines\r\n");
+                last_status = 1;
                 return 0;
             }
         }
@@ -1318,7 +1337,7 @@ static int run_pipeline(const char *line)
         tfd = sys_fcreate(redirect_g);
         if (tfd < 0) {
             puts_u("shell: cannot create "); puts_u(redirect_g);
-            puts_u("\r\n"); return 0;
+            puts_u("\r\n"); last_status = 1; return 0;
         }
     }
     long sv0 = -1, sv1 = -1;
@@ -1334,6 +1353,7 @@ static int run_pipeline(const char *line)
         if (sv0 >= 0) { sys_dup2(sv0, 0); sys_close(sv0); }
         if (tfd >= 0) sys_close(tfd);
         puts_u("shell: pipeline failed\r\n");
+        last_status = 1;
         return 0;
     }
 
@@ -1341,6 +1361,10 @@ static int run_pipeline(const char *line)
     int failed = 0;
     aoff = 0;
     int woff = 0;
+    /* Dispatch-entry reset (see the contract on
+     * dispatch_command): a stage fallback may raise this to
+     * 1; it is never lowered again inside the pipeline. */
+    last_status = 0;
     for (int s = 0; s < nstages_g; s++) {
         if (s > 0) {
             sys_dup2(prev_read, 0);
@@ -1386,10 +1410,11 @@ static int run_pipeline(const char *line)
         puts_u(itoa(cat_stdin_err, nb));
         puts_u("\r\n");
         cat_stdin_err = 0;
-        if (failed) puts_u("shell: pipeline failed\r\n");
+        last_status = 1;
+        if (failed) { puts_u("shell: pipeline failed\r\n"); last_status = 1; }
         return 0;
     }
-    if (failed) { puts_u("shell: pipeline failed\r\n"); return 0; }
+    if (failed) { puts_u("shell: pipeline failed\r\n"); last_status = 1; return 0; }
     return redirect_g ? -1 : prompt_nl;
 }
 
@@ -1419,6 +1444,7 @@ static int execute_line(char *line, long n)
     if (pr == PARSE_ERROR) {
         puts_u("shell: parse error: "); puts_u(parse_err);
         puts_u("\r\n");
+        last_status = 1;
         return 0;
     }
 
@@ -1434,9 +1460,15 @@ static int execute_line(char *line, long n)
      * Placed before the script session-command check: exit=1
      * is a variable, not the exit command (that check compares
      * whole names, and this word is not one). */
-    if (nstages_g == 1 && !redirect_g && stg_argc[0] == 1
-        && var_try_assign(stg_argv[0]))
-        return -1;
+    if (nstages_g == 1 && !redirect_g && stg_argc[0] == 1) {
+        int ar = var_try_assign(stg_argv[0]);
+        if (ar) {
+            /* An assignment line's status is the assignment's
+             * own outcome (tri-state: 1 stored, 2 refused). */
+            last_status = (ar == 2) ? 1 : 0;
+            return -1;
+        }
+    }
 
     /* Expansion (Phase 16 inc.2): the redirect target and the
      * command word expand here, before anything is created or
@@ -1460,6 +1492,7 @@ static int execute_line(char *line, long n)
             if (st) xerr = st;
             else if (!tbuf[0]) {
                 puts_u("shell: empty redirect target\r\n");
+                last_status = 1;
                 return 0;
             } else redirect_g = tbuf;
         }
@@ -1472,10 +1505,11 @@ static int execute_line(char *line, long n)
             while (w[ci] && ci < 63) { cmd[ci] = w[ci]; ci++; }
             cmd[ci] = '\0';
         }
-        if (xerr) { expand_fail(xerr); return 0; }
+        if (xerr) { expand_fail(xerr); last_status = 1; return 0; }
     }
     if (cmd_did && !cmd[0]) {
         puts_u("shell: empty command\r\n");
+        last_status = 1;
         return 0;
     }
 
@@ -1487,6 +1521,7 @@ static int execute_line(char *line, long n)
     if (run_depth > 0 && nstages_g == 1 && is_session_cmd(cmd)) {
         puts_u("run: "); puts_u(cmd);
         puts_u(" not allowed in a script\r\n");
+        last_status = 1;
         return 0;
     }
 
@@ -1502,7 +1537,7 @@ static int execute_line(char *line, long n)
             char raw[256];
             build_stage_arg(0, stg_argc[0], line, raw, 255);
             int st = expand_str(raw, arg, 192, &arg_did);
-            if (st) { expand_fail(st); return 0; }
+            if (st) { expand_fail(st); last_status = 1; return 0; }
         } else {
             build_stage_arg(0, stg_argc[0], line, arg, 191);
         }
@@ -1511,7 +1546,7 @@ static int execute_line(char *line, long n)
                                      : line + n;
         if (str_has_dollar(a)) {
             int st = expand_str(a, arg, 192, &arg_did);
-            if (st) { expand_fail(st); return 0; }
+            if (st) { expand_fail(st); last_status = 1; return 0; }
         } else {
             int ai = 0;
             while (a[ai] && ai < 191) { arg[ai] = a[ai]; ai++; }
@@ -1521,23 +1556,25 @@ static int execute_line(char *line, long n)
     if (redirect_g) {
         if (streq(cmd, "exec")) {
             puts_u("shell: redirection not supported for exec\r\n");
+            last_status = 1;
             return 0;
         }
         if (streq(cmd, "run")) {
             puts_u("shell: redirection not supported for run\r\n");
+            last_status = 1;
             return 0;
         }
         long tfd = sys_fcreate(redirect_g);
         if (tfd < 0) {
             puts_u("shell: cannot create "); puts_u(redirect_g);
-            puts_u("\r\n"); return 0;
+            puts_u("\r\n"); last_status = 1; return 0;
         }
         long sv = -1;
         for (long k = 15; k >= 3; k--)
             if (sys_dup2(k, k) < 0) { sv = k; break; }
         if (sv < 0 || sys_dup2(1, sv) < 0) {
             sys_close(tfd);
-            puts_u("shell: redirection failed\r\n"); return 0;
+            puts_u("shell: redirection failed\r\n"); last_status = 1; return 0;
         }
         redir_save = sv;
         sys_dup2(tfd, 1);
@@ -1552,6 +1589,7 @@ static int execute_line(char *line, long n)
             for (int j = 0; arg[j] && ri < 250; j++) rline[ri++] = arg[j];
         }
         rline[ri] = '\0';
+        last_status = 0;
         dispatch_command(cmd, arg, rline, ri);
         redir_restore();
         return -1;
@@ -1568,8 +1606,17 @@ static int execute_line(char *line, long n)
         char xline[512];
         int did2 = 0;
         expand_str(line, xline, 512, &did2);
+        /* Dispatch-entry reset (see the contract on
+         * dispatch_command): AFTER every expansion of this
+         * line has read the old status -- the fallback line
+         * above is one of those expansions -- and before
+         * dispatch. The fallback may raise it to 1; nothing
+         * after dispatch lowers it again, so a `run` line
+         * leaves its last script line's status standing. */
+        last_status = 0;
         dispatch_command(cmd, arg, xline, (long)slen_u(xline));
     } else {
+        last_status = 0;
         dispatch_command(cmd, arg, line, n);
     }
     return prompt_nl;
@@ -1667,7 +1714,23 @@ static void cmd_run(const char *arg)
  * returns (and after fd 1 is restored, when redirected).
  * prompt_nl records the branches whose prompt used to be
  * "\r\n> " because their output does not end with a
- * newline; for them the caller prints "\r\n> ". */
+ * newline; for them the caller prints "\r\n> ".
+ *
+ * Status contract (Phase 16 inc.3): last_status is owned
+ * by the shell's layers, never by a builtin. Every caller
+ * sets last_status = 0 at the moment it commits to
+ * dispatching (execute_line's plain and redirect paths,
+ * run_pipeline before its stage loop), and NOTHING
+ * assigns it after dispatch returns -- so a `run` line
+ * leaves its last script line's status standing, and a
+ * pipeline keeps 1 if ANY stage failed. The one write
+ * inside this function is the echo fallback's: an unknown
+ * command is the dispatch layer's own failure, so it
+ * raises last_status to 1. Builtin-reported failures
+ * (cat: not found, usage: ..., run: not found) do not
+ * touch it: with no exit-code ABI they are
+ * indistinguishable from normal output without
+ * pattern-matching text, which the model refuses. */
 static void dispatch_command(const char *cmd, const char *arg,
                              const char *line, long n)
 {
@@ -1899,6 +1962,9 @@ static void dispatch_command(const char *cmd, const char *arg,
         return;
     }
 
+    /* Unknown command: the dispatch layer's one failure
+     * write (see the status contract above). */
+    last_status = 1;
     puts_u("echo: ");
     sys_write(STDOUT, line, n);
     prompt_nl = 1;
