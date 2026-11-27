@@ -1,6 +1,7 @@
 #include "elf.h"
 #include "../mem/vmm.h"
 #include "../mem/pmm.h"
+#include "../sys/uaccess_check.h"   /* user-range bounds (Phase 17 inc.3) */
 
 /* User stack: 16KB mapped just below 0x10001000000 (1TB + 16MB) */
 #define USER_STACK_TOP    0x10001000000UL
@@ -61,6 +62,61 @@ int elf_load(const uint8_t *data, uint64_t size,
     if (eh->e_ident[5] != ELF_DATA_LE)            return -1;
     if (eh->e_type    != ELF_TYPE_EXEC)            return -1;
     if (eh->e_machine != ELF_MACH_X64)            return -1;
+
+    /* Phase 17 inc.4: validate the program headers BEFORE
+     * anything is allocated or copied. The file bytes are
+     * user-writable content, i.e. attacker-controlled input
+     * to ring 0; until this pass completes, no phdr field
+     * is trusted. Every refusal below returns -1 with
+     * nothing allocated yet (unlike the load loop's
+     * PMM-exhaustion path, which leaks the half-built
+     * space the way all pre-inc.4 failure paths did).
+     * The load loop further down re-reads the same fields
+     * from the same immutable kernel buffer with the same
+     * skip predicate (PT_LOAD, memsz != 0) and, after the
+     * e_phentsize check, the same stride. */
+    if (eh->e_phentsize != sizeof(Elf64_Phdr)) return -1;
+    if (eh->e_phoff > size) return -1;
+    if ((uint64_t)eh->e_phnum * sizeof(Elf64_Phdr) > size - eh->e_phoff)
+        return -1;
+
+    int entry_ok = 0;
+    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(data + eh->e_phoff
+                                        + (uint64_t)i * sizeof(Elf64_Phdr));
+        if (ph->p_type != PT_LOAD) continue;
+        if (ph->p_memsz == 0)      continue;
+
+        /* The segment's file bytes must exist and fit its
+         * memory image. A filesz of 0 reads nothing, so its
+         * p_offset is deliberately unchecked. */
+        if (ph->p_filesz > ph->p_memsz) return -1;
+        if (ph->p_filesz > 0) {
+            if (ph->p_offset > size) return -1;
+            if (ph->p_filesz > size - ph->p_offset) return -1;
+        }
+
+        /* The segment must lie wholly in user space: at or
+         * above the end of the shared PML4 slot-0 identity
+         * range (a segment there would map attacker frames
+         * over the kernel's own mapping in every address
+         * space) and ending at or below the canonical user
+         * limit. The guarded subtraction also proves
+         * p_vaddr + p_memsz cannot wrap, which the entry
+         * check and the load loop's map_sz arithmetic rely
+         * on; the map_sz guards are kept explicit anyway. */
+        if (ph->p_vaddr < UACCESS_KERNEL_SLOT_END) return -1;
+        if (ph->p_vaddr >= UACCESS_USER_LIMIT) return -1;
+        if (ph->p_memsz > UACCESS_USER_LIMIT - ph->p_vaddr) return -1;
+        uint64_t map_sz = ph->p_memsz + (ph->p_vaddr & (PAGE_SIZE - 1));
+        if (map_sz < ph->p_memsz) return -1;
+        if (map_sz > ~(uint64_t)0 - (PAGE_SIZE - 1)) return -1;
+
+        if (eh->e_entry >= ph->p_vaddr
+                && eh->e_entry - ph->p_vaddr < ph->p_memsz)
+            entry_ok = 1;
+    }
+    if (!entry_ok) return -1;
 
     /* Create a new address space */
     uint64_t cr3 = vmm_create_address_space();
