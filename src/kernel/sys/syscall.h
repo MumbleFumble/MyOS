@@ -2,6 +2,14 @@
 
 #include <stdint.h>
 
+/* EFAULT: a syscall's user pointer was refused by the
+ * validated copy layer (Phase 17 inc.3): the range is not
+ * wholly present, user-accessible memory in the caller's
+ * own address space. -3 collides with no existing return
+ * in the tree (flat -1; E_WOULDBLOCK is -2). Mirrored for
+ * user programs in src/lib/syscall.h. */
+#define EFAULT (-3)
+
 /* Syscall numbers */
 #define SYS_WRITE   1   /* write(fd, buf, count)  -> bytes written */
 #define SYS_EXIT    2   /* exit(status)           -> does not return */

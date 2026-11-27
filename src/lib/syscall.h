@@ -185,6 +185,11 @@ long sys_dup2(long oldfd, long newfd);
  * kernel's fault path (Phase 17 inc.2). Mirrors EXIT_FAULT
  * in the kernel's sched.h. */
 #define EXIT_FAULT 4000
+
+/* A core syscall's user pointer was refused by the
+ * kernel's validated copy layer (Phase 17 inc.3). Mirrors
+ * EFAULT in the kernel's syscall.h. */
+#define EFAULT (-3)
 long sys_pipe(long *fds_out);
 long sys_funlink(const char *path);
 long sys_frename(const char *old_path, const char *new_path);

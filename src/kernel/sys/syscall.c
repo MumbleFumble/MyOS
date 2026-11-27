@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "uaccess.h"
 #include "../arch/idt.h"
 #include "../arch/gdt.h"
 #include "../arch/port_io.h"
@@ -357,7 +358,13 @@ static void desc_return_raw(struct file *f)
  * nothing is installed and nothing leaks. */
 static int64_t sys_pipe(uint64_t fds_va)
 {
-    if (!fds_va) return -1;
+    if (!fds_va) return -1;   /* pinned behaviour (pipetest) */
+    /* Phase 17 inc.3: the 16-byte out array (two int64_t,
+     * matching the lib's long[2]) must be validated user
+     * memory before anything is created or written. All
+     * failure paths below run before the array write, so a
+     * refusal leaves the caller's array untouched. */
+    if (!user_range_ok(fds_va, 16, 1)) return EFAULT;
     struct task *t = sched_current_task();
     int rslot = -1, wslot = -1;
     for (int fd = 3; fd < MAX_FDS; fd++) {
@@ -402,6 +409,9 @@ static int64_t sys_pipe(uint64_t fds_va)
 /* SYS_WRITE: write(fd, buf, count) */
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
 {
+    /* Phase 17 inc.3: the whole buffer range must be
+     * validated user memory before the fd op reads it. */
+    if (!user_range_ok(buf, count, 0)) return EFAULT;
     struct file *f = fd_get(fd);
     if (!f || !f->ops->write) return -1;
     return f->ops->write(f, (const uint8_t *)buf, count);
@@ -411,6 +421,10 @@ static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count)
 static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count)
 {
     if (count == 0) return 0;
+    /* Phase 17 inc.3: the whole buffer range must be
+     * validated writable user memory before the fd op
+     * fills it. */
+    if (!user_range_ok(buf, count, 1)) return EFAULT;
     struct file *f = fd_get(fd);
     if (!f || !f->ops->read) return -1;
     return f->ops->read(f, (uint8_t *)buf, count);
@@ -485,8 +499,22 @@ static int64_t sys_wait(uint64_t pid)
  * Returns the new task's pid, or -1 on error. */
 static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
 {
-    const char *name    = (const char *)name_va;
-    const char *cmdline = cmdline_va ? (const char *)cmdline_va : name;
+    /* Phase 17 inc.3: name and cmdline are copied through
+     * the validated layer into kernel buffers first (name
+     * bounded by the filesystem name limit, cmdline by the
+     * shell's line length); the rest of this handler works
+     * on the kernel copies only. */
+    char kname[64];
+    if (copy_string_from_user(kname, name_va, sizeof kname) < 0)
+        return EFAULT;
+    char kcmd[256];
+    const char *cmdline = kname;
+    if (cmdline_va) {
+        if (copy_string_from_user(kcmd, cmdline_va, sizeof kcmd) < 0)
+            return EFAULT;
+        cmdline = kcmd;
+    }
+    const char *name = kname;
 
     /* First try the VFS (ramfs + future disk) */
     vfs_node_t *node = vfs_open(name);
@@ -546,7 +574,10 @@ static int64_t fd_alloc(struct task *t, vfs_node_t *node)
 /* SYS_OPEN: open(path) -> fd, or -1 on not-found / table full */
 static int64_t sys_open(uint64_t path_va)
 {
-    const char *path = (const char *)path_va;
+    char kpath[64];
+    if (copy_string_from_user(kpath, path_va, sizeof kpath) < 0)
+        return EFAULT;
+    const char *path = kpath;
     vfs_node_t *node = vfs_open(path);
     if (!node) return -1;
     return fd_alloc(sched_current_task(), node);
@@ -556,7 +587,10 @@ static int64_t sys_open(uint64_t path_va)
  * file if needed, truncates it if it exists. */
 static int64_t sys_fcreate(uint64_t path_va)
 {
-    const char *path = (const char *)path_va;
+    char kpath[64];
+    if (copy_string_from_user(kpath, path_va, sizeof kpath) < 0)
+        return EFAULT;
+    const char *path = kpath;
     vfs_node_t *node = vfs_create(path);
     if (!node) return -1;
     return fd_alloc(sched_current_task(), node);
@@ -600,6 +634,9 @@ static int64_t sys_dup2(uint64_t oldfd, uint64_t newfd)
 /* SYS_READDIR: readdir(index, name_buf) -> 0 or -1 */
 static int64_t sys_readdir(uint64_t index, uint64_t name_buf_va)
 {
+    /* Phase 17 inc.3: the name buffer (VFS_NAME_MAX bytes,
+     * written by the callee) must be validated user memory. */
+    if (!user_range_ok(name_buf_va, VFS_NAME_MAX, 1)) return EFAULT;
     return (int64_t)vfs_readdir((uint32_t)index, (char *)name_buf_va);
 }
 
@@ -1145,13 +1182,21 @@ static int64_t sys_df(uint64_t out_va)
 static int64_t sys_funlink(uint64_t path_va)
 {
     if (!path_va) return -1;
-    return vfs_unlink((const char *)path_va);
+    char kpath[64];
+    if (copy_string_from_user(kpath, path_va, sizeof kpath) < 0)
+        return EFAULT;
+    return vfs_unlink(kpath);
 }
 
 static int64_t sys_frename(uint64_t old_va, uint64_t new_va)
 {
     if (!old_va || !new_va) return -1;
-    return vfs_rename((const char *)old_va, (const char *)new_va);
+    char kold[64], knew[64];
+    if (copy_string_from_user(kold, old_va, sizeof kold) < 0)
+        return EFAULT;
+    if (copy_string_from_user(knew, new_va, sizeof knew) < 0)
+        return EFAULT;
+    return vfs_rename(kold, knew);
 }
 
 /* SYS_ACCESS_DRAIN: access_drain(buf_va, max_records)
