@@ -6,6 +6,7 @@
 .macro IRQ_STUB num
 .global irq\num
 irq\num:
+    cld                 /* an interrupted user task may have DF=1 */
     push rax
     push rbx
     push rcx

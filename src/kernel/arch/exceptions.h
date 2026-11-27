@@ -6,6 +6,11 @@
  * CPU pushed; the faulting linear address is read from CR2 inside. */
 void page_fault_handler(uint64_t err_code);
 
+/* C entry point for the generic exception stubs (vectors
+ * 0, 1, 6, 12, 13; Phase 17 inc.2). vec/err/cs come from
+ * the CPU frame via exc_stubs.S. Never returns. */
+void exception_handler(uint64_t vec, uint64_t err, uint64_t cs);
+
 /* Installs the IDT gate for vector 14. Call after idt_init(). */
 void exceptions_init(void);
 

@@ -18,6 +18,7 @@
 .global isr80
 
 isr80:
+    cld                 /* DF is user-controlled; kernel C assumes DF=0 */
     /* Save callee-saved and the registers we'll clobber for the C call */
     push r15
     push r14

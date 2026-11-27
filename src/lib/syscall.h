@@ -180,6 +180,11 @@ long sys_dup2(long oldfd, long newfd);
  * writer still open, or full). Distinct from -1 (error) and
  * 0 (EOF). Mirrors E_WOULDBLOCK in the kernel's fd.h. */
 #define E_WOULDBLOCK (-2)
+
+/* Exit code a waiter collects for a task killed by the
+ * kernel's fault path (Phase 17 inc.2). Mirrors EXIT_FAULT
+ * in the kernel's sched.h. */
+#define EXIT_FAULT 4000
 long sys_pipe(long *fds_out);
 long sys_funlink(const char *path);
 long sys_frename(const char *old_path, const char *new_path);

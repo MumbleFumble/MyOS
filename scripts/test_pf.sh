@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# Headless test for the Phase 2 page-fault handler (increment 1: observe).
-# Boots MyOS in QEMU (no display), types `pf` in the shell (a deliberate
-# ring-3 write to unmapped 0x50000000000), and checks the serial log for
-# the handler's [pf] line with the expected CR2 and decoded error code.
+# Headless test for the page-fault path. Boots MyOS in QEMU
+# (no display), types `pf` in the shell, and checks the serial
+# log for the handler's [pf] line with the expected CR2 and
+# decoded error code.
+#
+# Phase 17 inc.2 premise change: `pf` no longer faults in the
+# shell's own context (which used to halt the whole kernel,
+# the Phase 2 behaviour this test originally observed). The
+# builtin now spawns faultprobe.elf, whose ring-3 write to
+# unmapped 0x50000000000 is killed by the fault path with
+# EXIT_FAULT (4000); the shell waits, reports the collected
+# code, and must still answer a further command.
 set -u
 
 ROOT=~/workspace/myos
@@ -57,12 +65,28 @@ wait_for() {
   return 0
 }
 
+PASS=1
 {
   type_word "pf"
   sleep 1
 } | socat - UNIX-CONNECT:"$SOCK" >/dev/null 2>&1 || true
 
-PASS=1
+if ! wait_for "pf: probe exit 4000" 60; then
+  echo "[test] FAIL: shell never collected EXIT_FAULT from the probe"
+  PASS=0
+fi
+
+# The shell survived its own probe: a further command runs.
+{
+  type_word "getpid"
+  sleep 1
+} | socat - UNIX-CONNECT:"$SOCK" >/dev/null 2>&1 || true
+
+if ! wait_for "pid: " 30; then
+  echo "[test] FAIL: shell did not answer getpid after the probe died"
+  PASS=0
+fi
+
 if ! wait_for "\[pf\] PAGE FAULT" 60; then
   echo "[test] FAIL: handler never fired"
   PASS=0
@@ -82,6 +106,10 @@ if ! grep -q "(not-present write user)" "$SERIAL"; then
   echo "[test] FAIL: decoded error-code text mismatch"
   PASS=0
 fi
+if ! grep -q "killing faulting task" "$SERIAL"; then
+  echo "[test] FAIL: fault path never killed the probe task"
+  PASS=0
+fi
 
 {
   echo "quit"
@@ -94,7 +122,7 @@ echo "=== [pf] LINES ==="
 grep -a "\[pf\]" "$SERIAL" | head -10
 echo ""
 if [ "$PASS" -eq 1 ]; then
-  echo "[test] PASS: page-fault handler fired with expected CR2/err"
+  echo "[test] PASS: probe killed with EXIT_FAULT, shell alive (kill-not-halt)"
 else
   echo "[test] FAIL"
   echo "=== FULL SERIAL TAIL ==="

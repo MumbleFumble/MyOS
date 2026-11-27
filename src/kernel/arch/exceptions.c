@@ -8,6 +8,13 @@
 #include "../proc/sched.h"
 
 extern void pf_stub(void);
+extern void exc0_stub(void);
+extern void exc1_stub(void);
+extern void exc6_stub(void);
+extern void exc12_stub(void);
+extern void exc13_stub(void);
+
+static void fault_kill_current(void);
 
 /* -----------------------------------------------------------------------
  * Demand-paged user region (Phase 2, increment 2).
@@ -222,9 +229,60 @@ void page_fault_handler(uint64_t err_code)
         return;
     }
 
+    /* Phase 17 inc.2: a USER-mode fault that the demand
+     * path did not resolve kills the faulting task with
+     * EXIT_FAULT; the kernel and every other task run on.
+     * Supervisor faults (including bad syscall pointers at
+     * CPL0, which are the copy_from/to_user step's problem)
+     * keep the halt below. */
+    if (user_mode) {
+        exc_puts("[pf] user fault outside demand region - killing faulting task\r\n");
+        fault_kill_current();
+    }
+
     exc_puts("[pf] outside demand region or unrecoverable - halting\r\n");
 
 halt:
+    __asm__ volatile("cli");
+    for (;;) __asm__ volatile("hlt");
+}
+
+/* Phase 17 inc.2: terminate the current task through the
+ * ordinary exit machinery with the distinctive fault exit
+ * code, so a parent waiting in SYS_WAIT collects
+ * EXIT_FAULT. Called only for faults taken from ring 3,
+ * with IRQs off (exception gate); never returns. The task's
+ * fds and address space are NOT torn down (the known
+ * task-exit leak; pool sizing absorbs it). */
+static void fault_kill_current(void)
+{
+    struct task *t = sched_current_task();
+    if (t) t->exit_code = EXIT_FAULT;
+    sched_current_exit();
+    for (;;) __asm__ volatile("hlt");
+}
+
+/* Generic CPU-exception handler (Phase 17 inc.2), entered
+ * from exc_stubs.S for vectors 0 (#DE), 1 (#DB), 6 (#UD),
+ * 12 (#SS) and 13 (#GP). cs is the interrupted context's
+ * CS from the CPU frame: RPL 3 means the exception was
+ * taken from ring 3 and the task is killed with
+ * EXIT_FAULT; RPL 0 keeps the historical halt (previously
+ * these vectors had no gate at all and escalated to a
+ * triple fault / reset). Never returns. */
+void exception_handler(uint64_t vec, uint64_t err, uint64_t cs)
+{
+    exc_puts("\r\n[exc] vector ");
+    exc_puthex64(vec);
+    exc_puts(" err=");
+    exc_puthex64(err);
+    exc_puts(" cs=");
+    exc_puthex64(cs);
+    if ((cs & 3) != 0) {
+        exc_puts(" - killing faulting task\r\n");
+        fault_kill_current();
+    }
+    exc_puts(" - kernel exception, halting\r\n");
     __asm__ volatile("cli");
     for (;;) __asm__ volatile("hlt");
 }
@@ -233,4 +291,11 @@ void exceptions_init(void)
 {
     /* Vector 14 = #PF. 0x8E = present, ring 0, 64-bit interrupt gate. */
     idt_set_gate(14, (uint64_t)pf_stub, 0x08, 0x8E);
+    /* Phase 17 inc.2: user-reachable CPU exceptions share
+     * the kill-the-task path (see exception_handler). */
+    idt_set_gate(0,  (uint64_t)exc0_stub,  0x08, 0x8E);
+    idt_set_gate(1,  (uint64_t)exc1_stub,  0x08, 0x8E);
+    idt_set_gate(6,  (uint64_t)exc6_stub,  0x08, 0x8E);
+    idt_set_gate(12, (uint64_t)exc12_stub, 0x08, 0x8E);
+    idt_set_gate(13, (uint64_t)exc13_stub, 0x08, 0x8E);
 }

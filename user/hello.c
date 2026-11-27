@@ -2203,12 +2203,26 @@ static void dispatch_command(const char *cmd, const char *arg,
     }
 
     if (streq(cmd, "pf")) {
-        /* Deliberately fault from ring 3: write to an unmapped
-         * address. Expect the #PF handler to fire with
-         * cr2=0x50000000000, err=0x6 (not-present, write, user). */
-        puts_u("pf: writing to unmapped 0x50000000000...\r\n");
-        *(volatile char *)0x50000000000UL = 42;
-        puts_u("pf: survived?!\r\n");
+        /* Fault probe (Phase 17 inc.2): the probe program
+         * writes to unmapped 0x50000000000 in its OWN task
+         * and is killed by the fault path with EXIT_FAULT;
+         * the shell waits for it and reports the collected
+         * code. (Before inc.2 this faulted in the shell's
+         * own context and halted the whole kernel.) */
+        puts_u("pf: spawning fault probe...\r\n");
+        long pid = sys_exec("faultprobe.elf",
+                            "faultprobe.elf unmapped");
+        if (pid < 0) {
+            puts_u("pf: exec failed\r\n");
+            prompt_nl = 1;
+            return;
+        }
+        long code = sys_wait(pid);
+        char nbuf[24];
+        puts_u("pf: probe exit ");
+        puts_u(itoa(code, nbuf));
+        puts_u("\r\n");
+        prompt_nl = 1;
         return;
     }
 

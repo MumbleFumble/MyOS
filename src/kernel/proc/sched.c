@@ -206,8 +206,21 @@ static void sched_tick_cli(void)
 
 void sched_current_exit(void)
 {
+    /* IRQs off for the whole mark-and-wake sequence: called
+     * from sys_exit with IF=1 (trap gate), a timer IRQ in
+     * this window could switch the dying task out before
+     * its waiters are woken, stranding them forever. The
+     * fault path (Phase 17 inc.2) already runs with IF=0.
+     * sched_tick_cli's sti restores IF for the next task. */
+    __asm__ volatile("cli");
     tasks[current].state     = TASK_DEAD;
-    tasks[current].exit_code = 0;  /* default; sys_exit sets it before calling us */
+    /* exit_code is NOT reset here: the caller (sys_exit, or
+     * the fault path with EXIT_FAULT) sets it before calling
+     * us, and waiters collect exactly that value. (Before
+     * Phase 17 inc.2 this line zeroed it, so SYS_WAIT could
+     * never deliver a nonzero code.) Task creation
+     * initialises exit_code to 0 for tasks that never set
+     * one. */
 
     /* Wake any task waiting for this pid */
     uint32_t dead_pid = tasks[current].pid;
@@ -250,15 +263,28 @@ check:
         /* Found a dead child — collect its exit code */
         return tasks[i].exit_code;
     }
-    /* No dead child yet — block until one finishes */
-    /* First verify there is a matching live child */
+    /* No dead child yet — block until one finishes. The
+     * re-check and the transition to TASK_WAITING run with
+     * IRQs off: sched_current_exit wakes only tasks already
+     * in TASK_WAITING, so a child exiting between the check
+     * and the state store would lose its wakeup and strand
+     * this waiter (Phase 17 inc.2; waiting is now on the
+     * shell's critical path via the pf probe). */
+    __asm__ volatile("cli");
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].state != TASK_DEAD) continue;
+        if (tasks[i].parent_pid != tasks[current].pid) continue;
+        if (pid != 0 && tasks[i].pid != pid) continue;
+        __asm__ volatile("sti");
+        return tasks[i].exit_code;
+    }
     int has_child = 0;
     for (uint32_t i = 0; i < task_count; i++) {
         if (tasks[i].parent_pid != tasks[current].pid) continue;
         if (pid != 0 && tasks[i].pid != pid) continue;
         if (tasks[i].state != TASK_DEAD) { has_child = 1; break; }
     }
-    if (!has_child) return -1;
+    if (!has_child) { __asm__ volatile("sti"); return -1; }
 
     tasks[current].state    = TASK_WAITING;
     tasks[current].wait_pid = pid;

@@ -8,6 +8,14 @@
 /* Kernel stack size per task (8 KiB). */
 #define TASK_STACK_SIZE  8192
 
+/* Exit code recorded for a task killed by the fault path
+ * (Phase 17 inc.2): a user-mode CPU fault outside the
+ * demand region, or a user-mode #DE/#DB/#UD/#SS/#GP.
+ * Distinct from every voluntary exit code in the tree
+ * (existing programs exit 0 or 1). Mirrored for user
+ * programs in src/lib/syscall.h. */
+#define EXIT_FAULT  4000
+
 /* Maximum open file descriptors per task. fds 0/1/2 are stdin/stdout/stderr. */
 #define MAX_FDS  16
 
