@@ -1501,6 +1501,112 @@ static void expand_fail(int st)
 static char exp_cmd[128][64];
 static char exp_arg[128][192];
 
+/* Phase 17 inc.7: run an all-external pipeline (every
+ * stage's expanded command word ends in ".elf"). Each
+ * stage is spawned as a ring-3 child through
+ * SYS_EXEC_INHERIT, wired pipe-to-pipe; the shell never
+ * enters the data path and never rewires its own fds, so
+ * its fd table is exactly as before the line when this
+ * returns (every pipe end and the redirect fd are closed
+ * here), and fds 0/1 keep their pins (contrast the
+ * builtin path's dup2 wiring).
+ *
+ * Spawn/wait order: stages spawn in order, each new
+ * pipe's read end handed to the NEXT stage as its stdin;
+ * the shell closes its copy of an end as soon as the
+ * stage that needs it exists, and waits only after every
+ * stage is spawned. All stages therefore run
+ * concurrently, so a payload larger than the 1024-byte
+ * ring cannot deadlock: producers and consumers coexist
+ * and the shell holds no blocking role.
+ *
+ * Failure handling: stage programs are pre-flighted with
+ * sys_open before anything is created or spawned, so a
+ * nonexistent .elf fails the whole line atomically. If a
+ * spawn still fails mid-pipeline, the shell closes every
+ * end it still holds: a producer whose consumer never
+ * spawned then sees its write end's readers drop to zero
+ * (writes fail, it exits) and an already-spawned stage
+ * sees EOF as its producer exits - nothing hangs, and
+ * every spawned child is collected with sys_wait. Any
+ * nonzero stage exit makes the pipeline report failure.
+ * last_status is written on every exit path. */
+static int run_external_pipeline(void)
+{
+    for (int s = 0; s < nstages_g; s++) {
+        long fd = sys_open(exp_cmd[s]);
+        if (fd < 0) {
+            puts_u("shell: pipeline failed\r\n");
+            last_status = 1;
+            return 0;
+        }
+        sys_close(fd);
+    }
+    long tfd = -1;
+    if (redirect_g) {
+        tfd = sys_fcreate(redirect_g);
+        if (tfd < 0) {
+            puts_u("shell: cannot create "); puts_u(redirect_g);
+            puts_u("\r\n"); last_status = 1; return 0;
+        }
+    }
+    long pids[128];
+    int nspawned = 0;
+    long prev_r = -1;
+    int failed = 0;
+    for (int s = 0; s < nstages_g; s++) {
+        long cur[2];
+        cur[0] = -1; cur[1] = -1;
+        if (s < nstages_g - 1 && sys_pipe(cur) < 0) { failed = 1; break; }
+        /* Every stage's stdin and stdout come through the
+         * map - the first stage's stdin is the shell's own
+         * fd 0 and the last stage's stdout is the shell's
+         * fd 1 (or the redirect target). Mapping them (pin
+         * cleared on install) matters: the default console
+         * slots are pinned, so an unmapped last stage could
+         * not close its fd 1 and would exit with its
+         * close-failure code despite succeeding. */
+        long map[5];
+        int np = 0;
+        map[1 + np * 2] = 0; map[2 + np * 2] = (s > 0) ? prev_r : 0; np++;
+        map[1 + np * 2] = 1;
+        map[2 + np * 2] = (s < nstages_g - 1) ? cur[1] : (tfd >= 0 ? tfd : 1);
+        np++;
+        map[0] = np;
+        char rline[256];
+        int ri = 0;
+        char *scmd = exp_cmd[s];
+        char *sarg = exp_arg[s];
+        for (int j = 0; scmd[j] && ri < 250; j++) rline[ri++] = scmd[j];
+        if (sarg[0]) {
+            rline[ri++] = ' ';
+            for (int j = 0; sarg[j] && ri < 250; j++) rline[ri++] = sarg[j];
+        }
+        rline[ri] = '\0';
+        long pid = sys_exec_inherit(scmd, rline, map);
+        if (pid <= 0) {
+            if (cur[0] >= 0) { sys_close(cur[0]); sys_close(cur[1]); }
+            failed = 1;
+            break;
+        }
+        pids[nspawned++] = pid;
+        if (prev_r >= 0) { sys_close(prev_r); prev_r = -1; }
+        if (cur[0] >= 0) { sys_close(cur[1]); prev_r = cur[0]; }
+    }
+    if (prev_r >= 0) sys_close(prev_r);
+    if (tfd >= 0) sys_close(tfd);
+    int bad = failed;
+    for (int i = 0; i < nspawned; i++)
+        if (sys_wait(pids[i]) != 0) bad = 1;
+    if (bad) {
+        puts_u("shell: pipeline failed\r\n");
+        last_status = 1;
+        return 0;
+    }
+    last_status = 0;
+    return redirect_g ? -1 : 0;
+}
+
 static int run_pipeline(const char *line)
 {
     /* Pre-checks: nothing has run yet. */
@@ -1571,6 +1677,31 @@ static int run_pipeline(const char *line)
                 return 0;
             }
         }
+    }
+    /* Phase 17 inc.7: a stage whose expanded command word
+     * ends in ".elf" names an ELF program (no builtin name
+     * ends in .elf, so the rule cannot misfire). All-external
+     * pipelines run as ring-3 children; a mix of builtin and
+     * external stages is refused whole, here - after
+     * expansion, before any target is created or any stage
+     * runs. */
+    {
+        int next = 0, nbuilt = 0;
+        for (int s = 0; s < nstages_g; s++) {
+            const char *c = exp_cmd[s];
+            long cl = slen_u(c);
+            if (cl >= 4 && c[cl - 4] == '.' && c[cl - 3] == 'e' &&
+                c[cl - 2] == 'l' && c[cl - 1] == 'f')
+                next++;
+            else
+                nbuilt++;
+        }
+        if (next > 0 && nbuilt > 0) {
+            puts_u("shell: mixed builtin and external stages not supported\r\n");
+            last_status = 1;
+            return 0;
+        }
+        if (next > 0) return run_external_pipeline();
     }
     long tfd = -1;
     if (redirect_g) {
