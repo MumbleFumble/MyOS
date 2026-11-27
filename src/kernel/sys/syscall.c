@@ -497,7 +497,8 @@ static int64_t sys_wait(uint64_t pid)
  * arg1 = name virtual address (just the program name, looked up in VFS)
  * arg2 = cmdline virtual address (full command line including progname, or 0)
  * Returns the new task's pid, or -1 on error. */
-static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
+static int64_t sys_exec_impl(uint64_t name_va, uint64_t cmdline_va,
+                             const int64_t *pairs, int npairs)
 {
     /* Phase 17 inc.3: name and cmdline are copied through
      * the validated layer into kernel buffers first (name
@@ -516,6 +517,29 @@ static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
     }
     const char *name = kname;
 
+    /* Phase 17 inc.5: validate EVERY inheritance pair before
+     * the child exists and before any refcount moves: both
+     * fds in range (the unsigned compare also refuses the
+     * negative int64 values a crafted map can carry), the
+     * parent slot open, no duplicate child target. Any
+     * refusal leaves no child and no moved refcount. The
+     * parent's table cannot change between here and the
+     * install: only a task's own syscalls write its table,
+     * the parent is inside this one, and the exec body's
+     * file access goes through the VFS directly, never the
+     * caller's fd table. */
+    struct task *parent = sched_current_task();
+    if (pairs) {
+        for (int i = 0; i < npairs; i++) {
+            uint64_t cfd = (uint64_t)pairs[2 * i];
+            uint64_t pfd = (uint64_t)pairs[2 * i + 1];
+            if (cfd >= MAX_FDS || pfd >= MAX_FDS) return -1;
+            if (!parent->fds[pfd]) return -1;
+            for (int j = 0; j < i; j++)
+                if ((uint64_t)pairs[2 * j] == cfd) return -1;
+        }
+    }
+
     /* First try the VFS (ramfs + future disk) */
     vfs_node_t *node = vfs_open(name);
     if (!node) return -1;
@@ -532,14 +556,70 @@ static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
     kfree(buf);
     if (r != 0) return -1;
 
-    uint32_t caller_pid = sched_current_task()->pid;
-    uint32_t child_pid  = user_task_create(name, er.cr3, er.entry, er.ustack);
-    if (child_pid == 0) return -1;
-
-    struct task *child = sched_find_by_pid(child_pid);
-    if (child) child->parent_pid = caller_pid;
-
+    /* Create + parentage + inheritance install run with
+     * interrupts off (saved-flags restore, the fd idiom).
+     * user_task_create marks the child TASK_READY at once,
+     * so without this window the child could be scheduled
+     * and observe its default console table, or open files
+     * into slots the install is about to overwrite.
+     * Nothing inside the window blocks or enables
+     * interrupts (user_task_create only kmallocs and writes
+     * the task struct; desc_get on a validated live
+     * description cannot fail and never allocates). A slot
+     * the install displaces can only hold a FILE_STATIC
+     * console description or NULL (fd_init_std installs
+     * nothing else and the child has never run), so
+     * displacement needs no desc_put. */
+    uint64_t fl = fd_cli_save();
+    uint32_t child_pid = user_task_create(name, er.cr3, er.entry, er.ustack);
+    struct task *child = child_pid ? sched_find_by_pid(child_pid) : 0;
+    if (child) {
+        child->parent_pid = parent->pid;
+        if (pairs) {
+            for (int i = 0; i < npairs; i++) {
+                int cfd = (int)pairs[2 * i];
+                int pfd = (int)pairs[2 * i + 1];
+                struct file *f = parent->fds[pfd];   /* re-read; validated */
+                desc_get(f);
+                child->fds[cfd] = f;
+                child->fd_pinned &= (uint16_t)~(1u << cfd);
+            }
+        }
+    }
+    fd_restore(fl);
+    if (!child) return -1;
     return (int64_t)child_pid;
+}
+
+/* SYS_EXEC: plain spawn, console-only child (unchanged). */
+static int64_t sys_exec(uint64_t name_va, uint64_t cmdline_va)
+{
+    return sys_exec_impl(name_va, cmdline_va, 0, 0);
+}
+
+/* SYS_EXEC_INHERIT: spawn with a chosen subset of the
+ * caller's fd slots installed in the child. arg3 points to
+ * a user map: int64 count (0..MAX_FDS), then count pairs
+ * {child_fd, parent_fd}. The map is copied in through the
+ * Phase 17 inc.3 layer first (bad pointer -> EFAULT; a NULL
+ * map is simply a bad pointer here - callers wanting no
+ * inheritance use SYS_EXEC); count is taken only from the
+ * kernel copy. Semantic refusals return -1 from
+ * sys_exec_impl's validation, before any child exists. */
+static int64_t sys_exec_inherit(uint64_t name_va, uint64_t cmdline_va,
+                                uint64_t map_va)
+{
+    int64_t hdr;
+    if (copy_from_user(&hdr, map_va, sizeof hdr) < 0)
+        return EFAULT;
+    if (hdr < 0 || hdr > MAX_FDS) return -1;
+    int64_t pairs[MAX_FDS * 2];
+    if (hdr > 0
+            && copy_from_user(pairs,
+                              map_va + sizeof hdr,
+                              (uint64_t)hdr * 2 * sizeof(int64_t)) < 0)
+        return EFAULT;
+    return sys_exec_impl(name_va, cmdline_va, pairs, (int)hdr);
 }
 
 static int64_t fd_alloc(struct task *t, vfs_node_t *node)
@@ -1232,6 +1312,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_GETPID:  return sys_getpid();
     case SYS_WAIT:    return sys_wait(arg1);
     case SYS_EXEC:    return sys_exec(arg1, arg2);
+    case SYS_EXEC_INHERIT: return sys_exec_inherit(arg1, arg2, arg3);
     case SYS_OPEN:    return sys_open(arg1);
     case SYS_FCREATE: return sys_fcreate(arg1);
     case SYS_NETSTAT: return sys_netstat(arg1);

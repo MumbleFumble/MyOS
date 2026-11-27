@@ -40,6 +40,9 @@ USER_WINTEST_ELF   := build/user/wintest.elf
 USER_FAULTPROBE_ELF := build/user/faultprobe.elf
 USER_FAULTTEST_ELF  := build/user/faulttest.elf
 USER_BADPTR_ELF     := build/user/badptr.elf
+USER_FDCHILD_ELF    := build/user/fdchild.elf
+USER_FDITEST_ELF    := build/user/fditest.elf
+USER_FDPROBE_ELF    := build/user/fdprobe.elf
 
 SRC_DIR    := src
 # First collect all C files
@@ -95,6 +98,27 @@ $(USER_BADPTR_ELF): user/badptr.c src/lib/syscall.S src/lib/malloc.c user/user.l
 	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
 	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
 	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/badptr.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_FDCHILD_ELF): user/fdchild.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/fdchild.c -o build/user/fdchild.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/fdchild.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_FDITEST_ELF): user/fditest.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/fditest.c -o build/user/fditest.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/fditest.o build/user/syscall_u.o build/user/malloc_u.o
+
+$(USER_FDPROBE_ELF): user/fdprobe.c src/lib/syscall.S src/lib/malloc.c user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c user/fdprobe.c -o build/user/fdprobe.o
+	$(CC) $(USER_CFLAGS) -c src/lib/syscall.S -o build/user/syscall_u.o
+	$(CC) $(USER_CFLAGS) -c src/lib/malloc.c  -o build/user/malloc_u.o
+	$(LD) $(USER_LDFLAGS) -T user/user.ld -o $@ build/user/fdprobe.o build/user/syscall_u.o build/user/malloc_u.o
 
 $(USER_ARGTEST_ELF): user/argtest.c src/lib/syscall.S src/lib/malloc.c user/user.ld
 	@mkdir -p $(dir $@)
@@ -221,12 +245,12 @@ iso: $(KERNEL_ELF) disk
 	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(ISO_IMAGE) $(ISO_DIR)
 
 # Build the MyFS disk image from all files in disk_files/
-disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF) $(USER_FDTEST_ELF) $(USER_DUPTEST_ELF) $(USER_PIPETEST_ELF) $(USER_WINTEST_ELF) $(USER_FAULTPROBE_ELF) $(USER_FAULTTEST_ELF) $(USER_BADPTR_ELF)
+disk: $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF) $(USER_FDTEST_ELF) $(USER_DUPTEST_ELF) $(USER_PIPETEST_ELF) $(USER_WINTEST_ELF) $(USER_FAULTPROBE_ELF) $(USER_FAULTTEST_ELF) $(USER_BADPTR_ELF) $(USER_FDCHILD_ELF) $(USER_FDITEST_ELF) $(USER_FDPROBE_ELF)
 	@mkdir -p $(dir $(DISK_IMAGE))
 	@if [ -d $(DISK_FILES_DIR) ] && [ "$$(ls -A $(DISK_FILES_DIR) 2>/dev/null)" ]; then \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF) $(USER_FDTEST_ELF) $(USER_DUPTEST_ELF) $(USER_PIPETEST_ELF) $(USER_WINTEST_ELF) $(USER_FAULTPROBE_ELF) $(USER_FAULTTEST_ELF) $(USER_BADPTR_ELF); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(DISK_FILES_DIR)/* $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF) $(USER_FDTEST_ELF) $(USER_DUPTEST_ELF) $(USER_PIPETEST_ELF) $(USER_WINTEST_ELF) $(USER_FAULTPROBE_ELF) $(USER_FAULTTEST_ELF) $(USER_BADPTR_ELF) $(USER_FDCHILD_ELF) $(USER_FDITEST_ELF) $(USER_FDPROBE_ELF); \
 	else \
-		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF) $(USER_FDTEST_ELF) $(USER_DUPTEST_ELF) $(USER_PIPETEST_ELF) $(USER_WINTEST_ELF) $(USER_FAULTPROBE_ELF) $(USER_FAULTTEST_ELF) $(USER_BADPTR_ELF); \
+		python3 scripts/mkfs_myfs.py $(DISK_IMAGE) $(USER_BENCH_CPU_ELF) $(USER_BENCH_IO_ELF) $(USER_BENCH_MIX_ELF) $(USER_DEMAND_ELF) $(USER_EVICT_ELF) $(USER_BENCH_PF_ELF) $(IO_TEST_BIN) $(IO_TEST2_BIN) $(USER_BENCH_FILES_ELF) $(USER_WTEST_ELF) $(USER_WTESTW_ELF) $(USER_WTESTV_ELF) $(USER_ARGTEST_ELF) $(USER_FDTEST_ELF) $(USER_DUPTEST_ELF) $(USER_PIPETEST_ELF) $(USER_WINTEST_ELF) $(USER_FAULTPROBE_ELF) $(USER_FAULTTEST_ELF) $(USER_BADPTR_ELF) $(USER_FDCHILD_ELF) $(USER_FDITEST_ELF) $(USER_FDPROBE_ELF); \
 	fi
 
 run: iso

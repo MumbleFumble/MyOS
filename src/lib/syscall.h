@@ -91,6 +91,7 @@ void  sys_clear(void);
 long  sys_getpid(void);
 long  sys_wait(long pid);
 long  sys_exec(const char *name, const char *cmdline);
+long  sys_exec_inherit(const char *name, const char *cmdline, const long *map);
 long  sys_open(const char *path);
 long  sys_close(long fd);
 long  sys_readdir(long index, char *name_buf);

@@ -325,5 +325,11 @@ sys_exec:
     mov  rax, 8         /* SYS_EXEC */
     int  0x80
     ret
+/* long sys_exec_inherit(const char *name, const char *cmdline, const long *map) */
+.global sys_exec_inherit
+sys_exec_inherit:
+    mov  rax, 45        /* SYS_EXEC_INHERIT */
+    int  0x80
+    ret
 
 .section .note.GNU-stack,"",@progbits
