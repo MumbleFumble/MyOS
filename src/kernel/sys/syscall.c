@@ -204,6 +204,23 @@ static void fd_release(struct task *t, int fd)
     if (f) desc_put(f);
 }
 
+/* Phase 18 inc.2 (fd.h): release every fd slot of a
+ * dying task, so description refcounts drop and backend
+ * closes run at the last alias (a killed pipe writer
+ * delivers EOF). Runs on every death path: sys_exit and
+ * the fault kill in the dying task's own context,
+ * SYS_KILL in the killer's context under cli. Pinned
+ * console slots are released like any other: fd_release
+ * clears the slot and desc_put returns immediately for
+ * the FILE_STATIC console descriptions, so the shared
+ * console is never counted, closed or freed -- only the
+ * dying task's own slots go away. */
+void fd_teardown_task(struct task *t)
+{
+    for (int fd = 0; fd < MAX_FDS; fd++)
+        if (t->fds[fd]) fd_release(t, fd);
+}
+
 /* fd.h: all slots free except the pinned console fds 0/1/2. */
 void fd_init_std(struct task *t)
 {
@@ -433,10 +450,42 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count)
 /* SYS_EXIT: exit(status) */
 static int64_t sys_exit(uint64_t status)
 {
-    sched_current_task()->exit_code = (int32_t)status;
+    /* Phase 18 inc.2: the exit code, the fd teardown and
+     * sched_current_exit's mark-and-wake form one cli
+     * section (the cli here covers the teardown;
+     * sched_current_exit clis itself), so a concurrent
+     * SYS_KILL cannot interleave with a half-torn-down
+     * exit or overwrite the chosen code: on a single
+     * core the killer can only run while this task is
+     * scheduled out, which cannot happen mid-section. */
+    __asm__ volatile("cli");
+    struct task *cur = sched_current_task();
+    cur->exit_code = (int32_t)status;
+    fd_teardown_task(cur);
     sched_current_exit();
     for (;;) __asm__ volatile("hlt");
     __builtin_unreachable();
+}
+
+/* SYS_KILL: kill(pid) -> 0 / -1 (Phase 18 inc.2). Ends
+ * the target with EXIT_KILLED, collected through
+ * SYS_WAIT. No permission model: any task may kill any
+ * user task; kernel tasks are refused inside
+ * sched_kill_task. Self-kill is exit with EXIT_KILLED,
+ * through the same cli + teardown discipline as
+ * sys_exit. */
+static int64_t sys_kill(uint64_t pid)
+{
+    struct task *cur = sched_current_task();
+    if (cur && (uint32_t)pid == cur->pid) {
+        __asm__ volatile("cli");
+        cur->exit_code = EXIT_KILLED;
+        fd_teardown_task(cur);
+        sched_current_exit();
+        for (;;) __asm__ volatile("hlt");
+        __builtin_unreachable();
+    }
+    return sched_kill_task((uint32_t)pid);
 }
 
 /* SYS_SBRK: sbrk(increment)
@@ -1330,6 +1379,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_BCACHE_PROBE: return sys_bcache_probe(arg1);
     case SYS_DUP2:    return sys_dup2(arg1, arg2);
     case SYS_PIPE:    return sys_pipe(arg1);
+    case SYS_KILL:    return sys_kill(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

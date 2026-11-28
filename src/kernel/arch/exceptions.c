@@ -251,13 +251,15 @@ halt:
  * ordinary exit machinery with the distinctive fault exit
  * code, so a parent waiting in SYS_WAIT collects
  * EXIT_FAULT. Called only for faults taken from ring 3,
- * with IRQs off (exception gate); never returns. The task's
- * fds and address space are NOT torn down (the known
- * task-exit leak; pool sizing absorbs it). */
+ * with IRQs off (exception gate); never returns. The
+ * task's fds ARE torn down (Phase 18 inc.2, like every
+ * death path); its address space is not reclaimed (the
+ * parked lifecycle residual; pool sizing absorbs it). */
 static void fault_kill_current(void)
 {
     struct task *t = sched_current_task();
     if (t) t->exit_code = EXIT_FAULT;
+    if (t) fd_teardown_task(t);
     sched_current_exit();
     for (;;) __asm__ volatile("hlt");
 }

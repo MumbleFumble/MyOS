@@ -86,6 +86,7 @@ typedef struct {
 long sys_write(long fd, const void *buf, long count);
 long sys_read(long fd, void *buf, long count);
 void sys_exit(long status) __attribute__((noreturn));
+long sys_kill(long pid);
 void *sys_sbrk(long increment);
 void  sys_clear(void);
 long  sys_getpid(void);
@@ -186,6 +187,11 @@ long sys_dup2(long oldfd, long newfd);
  * kernel's fault path (Phase 17 inc.2). Mirrors EXIT_FAULT
  * in the kernel's sched.h. */
 #define EXIT_FAULT 4000
+
+/* Exit status of a task terminated by SYS_KILL
+ * (Phase 18 inc.2). Mirrors EXIT_KILLED in
+ * src/kernel/proc/sched.h. */
+#define EXIT_KILLED 4001
 
 /* A core syscall's user pointer was refused by the
  * kernel's validated copy layer (Phase 17 inc.3). Mirrors

@@ -297,6 +297,13 @@ sys_pipe:
     int  0x80
     ret
 
+/* long sys_kill(long pid) */
+.global sys_kill
+sys_kill:
+    mov  rax, 46        /* SYS_KILL */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

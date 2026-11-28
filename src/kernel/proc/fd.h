@@ -61,3 +61,10 @@ struct file {
  * Defined in syscall.c. Called from every task-creation path
  * before the task can run. */
 void fd_init_std(struct task *t);
+
+/* Release every fd slot of a dying task (Phase 18 inc.2):
+ * description refcounts drop and backend closes run at
+ * the last alias, so a dead pipe writer delivers EOF.
+ * Called on every death path (exit, fault kill, SYS_KILL).
+ * Defined in syscall.c. */
+void fd_teardown_task(struct task *t);

@@ -204,6 +204,26 @@ static void sched_tick_cli(void)
     __asm__ volatile("sti");
 }
 
+/* Wake every task waiting (TASK_WAITING) on pid, with
+ * the wait-time accounting. Caller holds IRQs off.
+ * Shared by sched_current_exit and sched_kill_task
+ * (Phase 18 inc.2). */
+static void sched_wake_waiters(uint32_t pid)
+{
+    uint64_t now = (uint64_t)timer_ticks();
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (tasks[i].state == TASK_WAITING &&
+            (tasks[i].wait_pid == 0 || tasks[i].wait_pid == pid))
+        {
+            /* Accumulate the time this task spent blocked.
+             * wait_start_tick was recorded when the task
+             * entered TASK_WAITING. */
+            tasks[i].wait_ticks += now - tasks[i].wait_start_tick;
+            tasks[i].state = TASK_READY;
+        }
+    }
+}
+
 void sched_current_exit(void)
 {
     /* IRQs off for the whole mark-and-wake sequence: called
@@ -223,21 +243,59 @@ void sched_current_exit(void)
      * one. */
 
     /* Wake any task waiting for this pid */
-    uint32_t dead_pid = tasks[current].pid;
-    uint64_t now = (uint64_t)timer_ticks();
-    for (uint32_t i = 0; i < task_count; i++) {
-        if (tasks[i].state == TASK_WAITING &&
-            (tasks[i].wait_pid == 0 || tasks[i].wait_pid == dead_pid))
-        {
-            /* Accumulate the time this task spent blocked. wait_start_tick
-             * was recorded when the task entered TASK_WAITING. */
-            tasks[i].wait_ticks += now - tasks[i].wait_start_tick;
-            tasks[i].state = TASK_READY;
-        }
-    }
+    sched_wake_waiters(tasks[current].pid);
 
     sched_tick_cli();
     for (;;) __asm__ volatile("hlt");
+}
+
+/* Phase 18 inc.2: terminate the task with the given pid
+ * on behalf of another task (SYS_KILL). The whole
+ * operation -- find, mark DEAD, wake waiters, fd
+ * teardown -- runs in ONE cli section, so no third party
+ * can observe or interleave a half-killed task, EOF on
+ * the victim's pipes is atomic with its waiters' wakeup,
+ * and a second kill finds the task already DEAD. The
+ * backend closes fd_teardown_task runs are non-blocking
+ * bookkeeping in this kernel (desc_put restores the
+ * saved flags, here IF=0), so the window stays short.
+ *
+ * Never-resume is by state, not by flag: every path that
+ * can make a task runnable is source-state-guarded
+ * (sched_wake_io and the IRQ deadline scan only touch
+ * TASK_BLOCKED, the exit wake only TASK_WAITING,
+ * pick_next only READY/RUNNING, sched_tick refuses to
+ * re-mark a DEAD task READY), so a killed task's
+ * abandoned syscall frame is never resumed and its
+ * pending io_deadline_tick is never consulted again.
+ * Driver state a task killed mid-wait abandons (an
+ * in-flight ATA command's lock, a TCP wait) is the same
+ * exposure the fault-kill path has always had; the wait
+ * itself is deadline-bounded where it matters.
+ *
+ * Returns 0 on success, -1 when the pid does not exist,
+ * the task is already DEAD, or the target is a kernel
+ * task (cr3 == 0: idle, net, ... -- kernel tasks are
+ * unkillable). The caller itself is NOT handled here:
+ * sys_kill routes self-kill through the exit path.
+ * There is no permission model: any task may kill any
+ * user task (this kernel's tradition). */
+int sched_kill_task(uint32_t pid)
+{
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("cli");
+    struct task *t = sched_find_by_pid(pid);
+    if (!t || t->state == TASK_DEAD || t->cr3 == 0) {
+        if (rflags & 0x200) __asm__ volatile("sti");
+        return -1;
+    }
+    t->exit_code = EXIT_KILLED;
+    t->state     = TASK_DEAD;
+    sched_wake_waiters(pid);
+    fd_teardown_task(t);
+    if (rflags & 0x200) __asm__ volatile("sti");
+    return 0;
 }
 
 struct task *sched_current_task(void)

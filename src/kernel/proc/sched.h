@@ -16,6 +16,14 @@
  * programs in src/lib/syscall.h. */
 #define EXIT_FAULT  4000
 
+/* Exit code recorded for a task terminated by SYS_KILL
+ * (Phase 18 inc.2). Sibling to EXIT_FAULT; like it,
+ * spoofable by a program that exits with the same value
+ * (this kernel's wait returns the raw int32; the
+ * distinctiveness is against the tree's real exit codes).
+ * Mirrored for user programs in src/lib/syscall.h. */
+#define EXIT_KILLED 4001
+
 /* Maximum open file descriptors per task. fds 0/1/2 are stdin/stdout/stderr. */
 #define MAX_FDS  16
 
@@ -139,6 +147,14 @@ void sched_tick(uint64_t tick);
 
 /* Called by sys_exit: mark current task dead and switch away immediately. */
 void sched_current_exit(void);
+
+/* Terminate the task with the given pid on behalf of
+ * another task (Phase 18 inc.2, SYS_KILL): marks it DEAD
+ * with EXIT_KILLED, wakes its waiters and tears down its
+ * fds, all in one cli section. Returns 0, or -1 when the
+ * pid does not exist, is already DEAD, or names a kernel
+ * task (cr3 == 0). Never handles the caller itself. */
+int sched_kill_task(uint32_t pid);
 
 /*
  * Create a ring-3 task from a pre-loaded ELF result.
