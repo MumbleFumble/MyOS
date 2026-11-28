@@ -318,6 +318,13 @@ sys_setpgid:
     int  0x80
     ret
 
+/* long sys_setfg(long pgid) */
+.global sys_setfg
+sys_setfg:
+    mov  rax, 49        /* SYS_SETFG */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

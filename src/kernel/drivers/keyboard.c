@@ -2,6 +2,7 @@
 #include "vga.h"
 #include "../arch/irq.h"
 #include "../arch/port_io.h"
+#include "../proc/sched.h"
 
 /* -----------------------------------------------------------------------
  * US QWERTY scancode set 1 → ASCII tables
@@ -57,16 +58,19 @@ static void kb_push(char c)
  * ----------------------------------------------------------------------- */
 static int shift_held = 0;
 static int caps_lock  = 0;
+static int ctrl_held  = 0;
 
 static void keyboard_irq_handler(void)
 {
     uint8_t sc = inb(0x60); /* read scancode from PS/2 data port */
 
     if (sc & 0x80) {
-        /* Key release — only care about shift */
+        /* Key release — only care about shift and ctrl */
         uint8_t rel = sc & 0x7F;
         if (rel == 0x2A || rel == 0x36)
             shift_held = 0;
+        if (rel == 0x1D)
+            ctrl_held = 0;
         return;
     }
 
@@ -74,7 +78,26 @@ static void keyboard_irq_handler(void)
     switch (sc) {
     case 0x2A: case 0x36: shift_held = 1; return;   /* left/right shift  */
     case 0x3A: caps_lock ^= 1; return;               /* caps lock toggle  */
+    case 0x1D: ctrl_held = 1; return;                /* ctrl (both keys:
+                                                      * right ctrl arrives
+                                                      * E0-prefixed, and the
+                                                      * prefix byte is inert
+                                                      * in this handler)   */
     default:   break;
+    }
+
+    /* Ctrl-C (Phase 18 inc.5): the ONLY combination
+     * whose behaviour changes. The 'c' is NOT echoed
+     * and NOT pushed to the input ring -- the shell
+     * sees nothing -- and the IRQ does no kill work:
+     * it only records a pending SIGINT for the
+     * foreground group and wakes the delivery task
+     * (sched_note_ctrlc). Every other Ctrl combination
+     * falls through and types exactly what it typed
+     * before (Ctrl-A types 'a', Ctrl-Z types 'z'). */
+    if (ctrl_held && sc == 0x2E) {                   /* 'c' make code */
+        sched_note_ctrlc();
+        return;
     }
 
     if (sc >= 128) return;

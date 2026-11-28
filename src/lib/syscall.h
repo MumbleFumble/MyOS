@@ -95,6 +95,9 @@ long sys_setpgid(long pid, long pgid);
  * syscall.h; the stubs in syscall.S embed them. */
 #define SYS_GETPGID 47
 #define SYS_SETPGID 48
+
+long sys_setfg(long pgid);
+#define SYS_SETFG 49
 void *sys_sbrk(long increment);
 void  sys_clear(void);
 long  sys_getpid(void);

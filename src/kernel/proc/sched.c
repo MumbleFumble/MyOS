@@ -336,7 +336,7 @@ int sched_kill_task(uint32_t pid, int sig)
  * was signalled, -1 when the group has no live user
  * members (empty or nonexistent group; group 0 names
  * the kernel tasks, which are never signalled). */
-int sched_kill_group(uint32_t pgid, int sig)
+static int group_kill(uint32_t pgid, int sig, uint32_t excl_pid)
 {
     uint64_t rflags;
     __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
@@ -345,13 +345,87 @@ int sched_kill_group(uint32_t pgid, int sig)
     for (uint32_t i = 0; i < task_count; i++) {
         struct task *t = &tasks[i];
         if (t->pgid == pgid && t->state != TASK_DEAD &&
-            !task_is_kernel(t)) {
+            t->pid != excl_pid && !task_is_kernel(t)) {
             kill_mark(t, sig);
             signalled = 1;
         }
     }
     if (rflags & 0x200) __asm__ volatile("sti");
     return signalled ? 0 : -1;
+}
+
+int sched_kill_group(uint32_t pgid, int sig)
+{
+    return group_kill(pgid, sig, 0);
+}
+
+/* As sched_kill_group, but one pid is spared. Used
+ * ONLY by the Ctrl-C delivery path (inc.5), never by
+ * SYS_KILL: the foreground record's setter (the
+ * shell) must survive signalling the group it is
+ * itself waiting on -- during an exec the child
+ * shares the shell's group, and at the idle prompt
+ * the shell is the group's only member. */
+int sched_kill_group_excl(uint32_t pgid, int sig, uint32_t excl_pid)
+{
+    return group_kill(pgid, sig, excl_pid);
+}
+
+/* -----------------------------------------------------------------------
+ * Foreground group record + deferred Ctrl-C delivery
+ * (Phase 18 inc.5). fg_pgid starts 0 (no foreground):
+ * a Ctrl-C before anyone sets the record delivers to
+ * group 0, which has no user members -- a no-op.
+ * ----------------------------------------------------------------------- */
+static volatile uint32_t fg_pgid   = 0;
+static volatile uint32_t fg_setter = 0;
+
+void sched_fg_set(uint32_t pgid, uint32_t setter_pid)
+{
+    fg_pgid   = pgid;
+    fg_setter = setter_pid;
+}
+
+static volatile int      sigint_pending = 0;
+static volatile uint32_t sigint_pgid    = 0;
+static volatile uint32_t sigint_setter  = 0;
+static struct task      *sigint_task    = 0;
+
+/* Keyboard IRQ context: record ONLY. Snapshotting
+ * the foreground record here means a later SYS_SETFG
+ * cannot redirect a Ctrl-C that was already pressed.
+ * The wake mirrors the e1000 RX pattern. */
+void sched_note_ctrlc(void)
+{
+    sigint_pgid   = fg_pgid;
+    sigint_setter = fg_setter;
+    sigint_pending = 1;
+    if (sigint_task && sigint_task->state == TASK_BLOCKED)
+        sched_wake_io(sigint_task);
+}
+
+/* The delivery context: a kernel task, never an IRQ.
+ * Blocks on the I/O wait with a 50-tick fallback poll
+ * (the net RX task's pattern), so a lost wake delays
+ * a delivery by at most half a second. The result of
+ * the kill is deliberately ignored: delivery to an
+ * empty or stale group is a no-op, not an error. */
+void sched_sigint_task(void)
+{
+    sigint_task = sched_current_task();
+    for (;;) {
+        if (sigint_pending) {
+            uint32_t pgid, setter;
+            __asm__ volatile("cli");
+            pgid   = sigint_pgid;
+            setter = sigint_setter;
+            sigint_pending = 0;
+            __asm__ volatile("sti");
+            sched_kill_group_excl(pgid, 2 /* SIGINT */, setter);
+        } else {
+            sched_block_current_io((uint64_t)timer_ticks() + 50);
+        }
+    }
 }
 
 int64_t sched_getpgid(uint32_t pid)

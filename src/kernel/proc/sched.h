@@ -186,6 +186,24 @@ int sched_kill_group(uint32_t pgid, int sig);
 int64_t sched_getpgid(uint32_t pid);
 int64_t sched_setpgid(uint32_t pid, uint32_t pgid);
 
+/* Foreground group + Ctrl-C delivery (Phase 18 inc.5).
+ * The foreground record (fg pgid + the pid that set
+ * it) is written by SYS_SETFG and read by the
+ * keyboard path. sched_note_ctrlc is the ONLY thing
+ * the keyboard IRQ calls: it snapshots the record
+ * into a pending slot and wakes the delivery task --
+ * no kill or teardown work in IRQ context. The
+ * delivery task (sched_sigint_task, a kernel task)
+ * performs the group kill from task context.
+ * Delivery spares the recorded setter: at an idle
+ * prompt the foreground group is the shell's own and
+ * its only member is the shell, so a prompt-level
+ * Ctrl-C signals nobody. */
+void sched_fg_set(uint32_t pgid, uint32_t setter_pid);
+void sched_note_ctrlc(void);
+void sched_sigint_task(void);
+int sched_kill_group_excl(uint32_t pgid, int sig, uint32_t excl_pid);
+
 /*
  * Create a ring-3 task from a pre-loaded ELF result.
  * Sets up a kernel stack with an iretq frame targeting the ELF entry point

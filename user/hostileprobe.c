@@ -43,9 +43,22 @@ static int streq(const char *a, const char *b)
 static long raw_nr(long nr)
 {
     long ret;
-    asm volatile("int $0x80" : "=a"(ret)
-                 : "a"(nr), "D"(0L), "S"(0L), "d"(0L)
-                 : "rcx", "r11", "memory");
+    /* The argument registers are CLOBBERED by the
+     * kernel's int 0x80 path (isr80.S discards its
+     * saved copies; only rax returns), so they are
+     * declared clobbered here: without that, a compiler
+     * may keep a later call's number in rdx across this
+     * one and invoke the wrong syscall (observed when
+     * the restored toolchain's GCC started doing so,
+     * Nov 28 2026 -- the kernel ABI never preserved
+     * them). */
+    asm volatile("mov %[z], %%rdi\n\t"
+                 "mov %[z], %%rsi\n\t"
+                 "mov %[z], %%rdx\n\t"
+                 "int $0x80"
+                 : "=a"(ret)
+                 : "a"(nr), [z] "r" (0L)
+                 : "rcx", "r11", "rdi", "rsi", "rdx", "memory");
     return ret;
 }
 

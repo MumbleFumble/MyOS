@@ -1621,9 +1621,17 @@ static int run_external_pipeline(void)
     if (nstages_g >= 2)
         for (int i = 0; i < nspawned; i++)
             sys_setpgid(pids[i], pids[0]);
+    /* Foreground record (Phase 18 inc.5): while the
+     * pipeline runs, its shared group is foreground
+     * (a single stage inherits the shell's group,
+     * which is then the foreground group). Restored
+     * to the shell's own group after the waits below,
+     * on both completion paths. */
+    sys_setfg(nstages_g >= 2 ? pids[0] : sys_getpgid(0));
     int bad = failed;
     for (int i = 0; i < nspawned; i++)
         if (sys_wait(pids[i]) != 0) bad = 1;
+    sys_setfg(sys_getpgid(0));   /* prompt state restored */
     if (bad) {
         puts_u("shell: pipeline failed\r\n");
         last_status = 1;
@@ -2079,6 +2087,13 @@ void _start(long argc, char **argv)
 {
     (void)argc; (void)argv;   /* unused for now; shell is interactive */
     sys_clear();
+    /* Foreground record (Phase 18 inc.5): at the
+     * prompt the shell's own group is foreground.
+     * Ctrl-C delivery spares the recorded setter, so
+     * an idle-prompt Ctrl-C signals nobody; the exec
+     * and pipeline paths below re-record around every
+     * launch. */
+    sys_setfg(sys_getpgid(0));
     puts_u("MyOS shell v0.3\r\nType 'help' for commands.\r\n> ");
 
     redir_save = -1;
@@ -2428,12 +2443,18 @@ static void dispatch_command(const char *cmd, const char *arg,
         prog[pi2] = 0;
         long pid = sys_exec(prog, arg);
         if (pid < 0) { puts_u("exec: failed\r\n"); return; }
+        /* The child shares this shell's group, which
+         * is therefore the foreground group while it
+         * runs; delivery spares the setter (us), so a
+         * Ctrl-C kills the child and not the shell. */
+        sys_setfg(sys_getpgid(0));
         /* Stash the collected code; the executor turns
          * it into $? after dispatch (see exec_child_code).
          * A spawn failure above leaves the stash at -1:
          * no child existed, and the line's status is
          * unchanged from the pre-inc.3 behaviour. */
         exec_child_code = sys_wait(pid);
+        sys_setfg(sys_getpgid(0));   /* prompt state restored */
        
         return;
     }

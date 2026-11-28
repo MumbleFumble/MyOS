@@ -526,6 +526,22 @@ static int64_t sys_setpgid(uint64_t pid, uint64_t pgid)
     return sched_setpgid((uint32_t)pid, (uint32_t)pgid);
 }
 
+/* SYS_SETFG (Phase 18 inc.5): record the console's
+ * foreground process group for Ctrl-C delivery,
+ * together with the caller's pid (the recorded setter
+ * is spared by the delivery -- see sched.h). Any user
+ * task may set it; in practice only the shell does.
+ * pgid 0 is refused: group 0 is the kernel's, and a
+ * foreground record pointing at it could only ever
+ * be a bug. */
+static int64_t sys_setfg(uint64_t pgid)
+{
+    if (pgid == 0) return -1;
+    struct task *cur = sched_current_task();
+    sched_fg_set((uint32_t)pgid, cur ? cur->pid : 0);
+    return 0;
+}
+
 /* SYS_SBRK: sbrk(increment)
  * Grows (or queries, if increment==0) the calling task's heap.
  * Returns the old break on success, -1 on failure (OOM).
@@ -1420,6 +1436,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_KILL:    return sys_kill(arg1, arg2);
     case SYS_GETPGID: return sys_getpgid(arg1);
     case SYS_SETPGID: return sys_setpgid(arg1, arg2);
+    case SYS_SETFG:   return sys_setfg(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);
