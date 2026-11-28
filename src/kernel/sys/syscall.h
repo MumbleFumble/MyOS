@@ -66,6 +66,8 @@
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGTERM 15
+#define SYS_GETPGID 47       /* getpgid(pid) -> pgid or -1 (Phase 18) */
+#define SYS_SETPGID 48       /* setpgid(pid, pgid) -> 0 or -1 (Phase 18) */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

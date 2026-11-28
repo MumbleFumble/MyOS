@@ -74,6 +74,8 @@ struct task {
     uint64_t      heap_end;     /* current break (next free byte) */
     /* Process relationships */
     uint32_t      parent_pid;   /* pid of task that spawned this one, 0 = none */
+    uint32_t      pgid;         /* process group (Phase 18 inc.4): inherited at
+                                 * spawn; 0 = no group (kernel tasks only) */
     int32_t       exit_code;    /* exit status, valid when state == TASK_DEAD */
     uint32_t      wait_pid;     /* pid we are waiting on (0 = any child), TASK_WAITING only */
     /* Open file descriptor table: slots point at shared
@@ -162,6 +164,27 @@ void sched_current_exit(void);
  * The caller (sys_kill) has already validated sig
  * against the signal vocabulary. */
 int sched_kill_task(uint32_t pid, int sig);
+
+/* Group form of the kill (Phase 18 inc.4): terminate
+ * every live user task whose pgid matches, in one cli
+ * section, same per-task discipline as sched_kill_task.
+ * Returns 0 if at least one task was signalled, -1 if
+ * the group has no live user members. The caller may
+ * itself be among the victims; sys_kill finishes that
+ * case through sched_current_exit. */
+int sched_kill_group(uint32_t pgid, int sig);
+
+/* Process-group identity (Phase 18 inc.4).
+ * sched_getpgid: pid 0 names the caller; a DEAD task
+ * still reports its last pgid (slots persist); an
+ * unknown pid returns -1; kernel tasks report 0.
+ * sched_setpgid: pid 0 names the caller, pgid 0 means
+ * "the target's own pid" (become a group leader);
+ * refuses (-1, nothing changed) unknown or DEAD
+ * targets, kernel tasks, and a target group that has
+ * no live user member and is not the target's own pid. */
+int64_t sched_getpgid(uint32_t pid);
+int64_t sched_setpgid(uint32_t pid, uint32_t pgid);
 
 /*
  * Create a ring-3 task from a pre-loaded ELF result.

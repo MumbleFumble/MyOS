@@ -1604,6 +1604,23 @@ static int run_external_pipeline(void)
     }
     if (prev_r >= 0) sys_close(prev_r);
     if (tfd >= 0) sys_close(tfd);
+    /* Process groups (Phase 18 inc.4): a multi-stage
+     * external pipeline shares one group, led by the
+     * first spawned stage (pgid = pids[0], the POSIX
+     * job-control choice); a single external command
+     * keeps the default inheritance (the shell's own
+     * group). Assignment is post-spawn, as in POSIX
+     * shells: a stage can in principle run before its
+     * setpgid lands, but the shell completes every
+     * assignment here, before any wait, and no stage
+     * program in the tree spawns children or reads its
+     * own pgid at startup -- the window is observable
+     * only to a group kill issued inside it, which no
+     * test or program attempts. Builtin pipelines run
+     * in-process and have no child tasks to group. */
+    if (nstages_g >= 2)
+        for (int i = 0; i < nspawned; i++)
+            sys_setpgid(pids[i], pids[0]);
     int bad = failed;
     for (int i = 0; i < nspawned; i++)
         if (sys_wait(pids[i]) != 0) bad = 1;

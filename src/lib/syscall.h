@@ -87,6 +87,14 @@ long sys_write(long fd, const void *buf, long count);
 long sys_read(long fd, void *buf, long count);
 void sys_exit(long status) __attribute__((noreturn));
 long sys_kill(long pid, long sig);
+long sys_getpgid(long pid);
+long sys_setpgid(long pid, long pgid);
+
+/* Syscall numbers for the process-group calls
+ * (Phase 18 inc.4), mirroring src/kernel/sys/
+ * syscall.h; the stubs in syscall.S embed them. */
+#define SYS_GETPGID 47
+#define SYS_SETPGID 48
 void *sys_sbrk(long increment);
 void  sys_clear(void);
 long  sys_getpid(void);

@@ -304,6 +304,20 @@ sys_kill:
     int  0x80
     ret
 
+/* long sys_getpgid(long pid) */
+.global sys_getpgid
+sys_getpgid:
+    mov  rax, 47        /* SYS_GETPGID */
+    int  0x80
+    ret
+
+/* long sys_setpgid(long pid, long pgid) */
+.global sys_setpgid
+sys_setpgid:
+    mov  rax, 48        /* SYS_SETPGID */
+    int  0x80
+    ret
+
 /* long sys_prefetch_policy(long index) */
 .global sys_prefetch_policy
 sys_prefetch_policy:

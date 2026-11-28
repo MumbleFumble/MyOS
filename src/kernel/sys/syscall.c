@@ -482,6 +482,25 @@ static int64_t sys_kill(uint64_t pid, uint64_t sig)
 {
     if (sig != SIGINT && sig != SIGKILL && sig != SIGTERM)
         return -1;
+    /* Group form (Phase 18 inc.4, POSIX encoding): a
+     * negative pid targets the process group -pid.
+     * pid == 0 is NOT special-cased (POSIX would mean
+     * the caller's own group): it stays an ordinary
+     * nonexistent pid and returns -1, so a stray
+     * kill(0, sig) can never wipe out the caller's
+     * group. If the caller belongs to the target
+     * group it is signalled like any member, and the
+     * call finishes through the exit path instead of
+     * returning into a dead task. */
+    if ((int64_t)pid < 0) {
+        int rc = sched_kill_group((uint32_t)(-(int64_t)pid),
+                                  (int)sig);
+        if (rc == 0 && sched_current_task()->state == TASK_DEAD) {
+            sched_current_exit();
+            for (;;) __asm__ volatile("hlt");
+        }
+        return rc;
+    }
     struct task *cur = sched_current_task();
     if (cur && (uint32_t)pid == cur->pid) {
         __asm__ volatile("cli");
@@ -492,6 +511,19 @@ static int64_t sys_kill(uint64_t pid, uint64_t sig)
         __builtin_unreachable();
     }
     return sched_kill_task((uint32_t)pid, (int)sig);
+}
+
+/* SYS_GETPGID / SYS_SETPGID (Phase 18 inc.4): thin
+ * wrappers; the rules live with the task table in
+ * sched.c (sched_getpgid / sched_setpgid). */
+static int64_t sys_getpgid(uint64_t pid)
+{
+    return sched_getpgid((uint32_t)pid);
+}
+
+static int64_t sys_setpgid(uint64_t pid, uint64_t pgid)
+{
+    return sched_setpgid((uint32_t)pid, (uint32_t)pgid);
 }
 
 /* SYS_SBRK: sbrk(increment)
@@ -1386,6 +1418,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_DUP2:    return sys_dup2(arg1, arg2);
     case SYS_PIPE:    return sys_pipe(arg1);
     case SYS_KILL:    return sys_kill(arg1, arg2);
+    case SYS_GETPGID: return sys_getpgid(arg1);
+    case SYS_SETPGID: return sys_setpgid(arg1, arg2);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

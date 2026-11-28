@@ -122,6 +122,17 @@ static void task_entry_trampoline(void);
  * Public API
  * ----------------------------------------------------------------------- */
 
+/* The boot address space's CR3, captured at sched_init.
+ * Kernel tasks share it; user tasks always run on a
+ * fresh PML4 from the loader, so cr3 == kernel_cr3 is
+ * the reliable kernel-task test (Phase 18 inc.4: the
+ * inc.2 guard compared against 0, which no task ever
+ * has -- tasks[0] included -- so the documented
+ * kernel-task refusal never actually fired until this
+ * discriminator replaced it). */
+static uint64_t kernel_cr3;
+static int task_is_kernel(const struct task *t) { return t->cr3 == kernel_cr3; }
+
 void sched_init(void)
 {
     /* Task 0 = idle / kernel_main — it's already running.
@@ -134,6 +145,8 @@ void sched_init(void)
     tasks[0].name  = "idle";
     fd_init_std(&tasks[0]);
     tasks[0].cr3   = vmm_current_cr3();
+    kernel_cr3     = tasks[0].cr3;
+    tasks[0].pgid  = 0;
     task_count     = 1;
     current        = 0;
 }
@@ -159,6 +172,7 @@ uint32_t task_create(const char *name, void (*func)(void))
     t->name  = name;
     t->entry = func;
     t->cr3   = vmm_current_cr3();   /* kernel tasks share the boot address space */
+    t->pgid  = 0;                   /* kernel tasks belong to no group */
     t->parent_pid = 0;
     t->exit_code  = 0;
     t->wait_pid   = 0;
@@ -275,27 +289,110 @@ void sched_current_exit(void)
  *
  * Returns 0 on success, -1 when the pid does not exist,
  * the task is already DEAD, or the target is a kernel
- * task (cr3 == 0: idle, net, ... -- kernel tasks are
- * unkillable). The caller itself is NOT handled here:
- * sys_kill routes self-kill through the exit path.
- * There is no permission model: any task may kill any
- * user task (this kernel's tradition). */
+ * task (idle, net, ... -- kernel tasks are unkillable;
+ * the test is task_is_kernel, see sched_init). The
+ * caller itself is NOT handled here: sys_kill routes
+ * self-kill through the exit path. There is no
+ * permission model: any task may kill any user task
+ * (this kernel's tradition). */
+/* The per-task kill core: caller holds IRQs off and has
+ * already validated t (a live user task). Shared by
+ * sched_kill_task and sched_kill_group (inc.4). */
+static void kill_mark(struct task *t, int sig)
+{
+    t->exit_code = EXIT_SIGNAL_BASE + sig;
+    t->state     = TASK_DEAD;
+    sched_wake_waiters(t->pid);
+    fd_teardown_task(t);
+}
+
 int sched_kill_task(uint32_t pid, int sig)
 {
     uint64_t rflags;
     __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
     __asm__ volatile("cli");
     struct task *t = sched_find_by_pid(pid);
-    if (!t || t->state == TASK_DEAD || t->cr3 == 0) {
+    if (!t || t->state == TASK_DEAD || task_is_kernel(t)) {
         if (rflags & 0x200) __asm__ volatile("sti");
         return -1;
     }
-    t->exit_code = EXIT_SIGNAL_BASE + sig;
-    t->state     = TASK_DEAD;
-    sched_wake_waiters(pid);
-    fd_teardown_task(t);
+    kill_mark(t, sig);
     if (rflags & 0x200) __asm__ volatile("sti");
     return 0;
+}
+
+/* Phase 18 inc.4: terminate every live user task in a
+ * process group, in ONE cli section with the same
+ * per-task discipline as sched_kill_task (the closes
+ * fd_teardown_task runs are non-blocking, so the
+ * section stays short). Iteration order is table
+ * order; a member woken by an earlier member's death
+ * is still marked when its turn comes, and a waiter
+ * outside the group collects normally. The CALLER is
+ * not spared if it belongs to the group (POSIX): it is
+ * marked like any member, and sys_kill finishes the
+ * call through sched_current_exit instead of returning
+ * into a dead task. Returns 0 when at least one task
+ * was signalled, -1 when the group has no live user
+ * members (empty or nonexistent group; group 0 names
+ * the kernel tasks, which are never signalled). */
+int sched_kill_group(uint32_t pgid, int sig)
+{
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("cli");
+    int signalled = 0;
+    for (uint32_t i = 0; i < task_count; i++) {
+        struct task *t = &tasks[i];
+        if (t->pgid == pgid && t->state != TASK_DEAD &&
+            !task_is_kernel(t)) {
+            kill_mark(t, sig);
+            signalled = 1;
+        }
+    }
+    if (rflags & 0x200) __asm__ volatile("sti");
+    return signalled ? 0 : -1;
+}
+
+int64_t sched_getpgid(uint32_t pid)
+{
+    if (pid == 0) {
+        struct task *c = sched_current_task();
+        return c ? (int64_t)c->pgid : -1;
+    }
+    struct task *t = sched_find_by_pid(pid);
+    return t ? (int64_t)t->pgid : -1;
+}
+
+/* The check-and-set runs under cli so a concurrent
+ * group kill observes the pgid either before or after
+ * the move, never a half-moved state. */
+int64_t sched_setpgid(uint32_t pid, uint32_t pgid)
+{
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("cli");
+    struct task *t = pid ? sched_find_by_pid(pid)
+                         : sched_current_task();
+    int64_t rc = -1;
+    if (t && t->state != TASK_DEAD && !task_is_kernel(t)) {
+        uint32_t ng = pgid ? pgid : t->pid;
+        if (ng == t->pgid) {
+            rc = 0;                     /* already there */
+        } else if (ng == t->pid) {
+            t->pgid = ng; rc = 0;       /* become leader */
+        } else {
+            for (uint32_t i = 0; i < task_count; i++) {
+                struct task *u = &tasks[i];
+                if (u != t && u->pgid == ng &&
+                    u->state != TASK_DEAD && !task_is_kernel(u)) {
+                    t->pgid = ng; rc = 0; break;
+                }
+            }
+        }
+    }
+    if (rflags & 0x200) __asm__ volatile("sti");
+    return rc;
 }
 
 struct task *sched_current_task(void)
@@ -561,6 +658,16 @@ uint32_t user_task_create(const char *name, uint64_t cr3,
     t->name  = name;
     t->entry = (void (*)(void))0;   /* not used for ring-3 tasks */
     t->cr3   = cr3;
+    /* Process group (Phase 18 inc.4): inherit the
+     * spawner's group; a spawner with no group (a
+     * kernel task -- the boot spawn of the shell)
+     * makes the child a group leader (pgid = its pid).
+     * Set here, inside creation, so the value is right
+     * before the child can first be scheduled. */
+    {
+        struct task *spawner = sched_current_task();
+        t->pgid = (spawner && spawner->pgid) ? spawner->pgid : t->pid;
+    }
     t->parent_pid = 0;
     t->exit_code  = 0;
     t->wait_pid   = 0;
