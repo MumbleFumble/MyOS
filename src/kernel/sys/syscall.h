@@ -70,6 +70,9 @@
 #define SYS_SETPGID 48       /* setpgid(pid, pgid) -> 0 or -1 (Phase 18) */
 #define SYS_SETFG 49         /* setfg(pgid) -> 0 or -1: record the console
                               * foreground group for Ctrl-C (Phase 18) */
+#define SYS_TRYWAIT 50       /* trywait(pid) -> exit code, -2 if still
+                              * running, -1 if not the caller's child
+                              * (Phase 18: shell job reaping) */
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

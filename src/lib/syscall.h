@@ -98,6 +98,9 @@ long sys_setpgid(long pid, long pgid);
 
 long sys_setfg(long pgid);
 #define SYS_SETFG 49
+
+long sys_trywait(long pid);
+#define SYS_TRYWAIT 50
 void *sys_sbrk(long increment);
 void  sys_clear(void);
 long  sys_getpid(void);

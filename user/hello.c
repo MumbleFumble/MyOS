@@ -933,6 +933,158 @@ static int last_status;
  * own layer per the contract below. */
 static long exec_child_code = -1;
 
+/* Background jobs (Phase 18 inc.6). A trailing
+ * standalone & on an external command or external
+ * pipeline line launches it in the background: the
+ * job runs in its OWN process group (pgid = first
+ * stage's pid), the foreground record is never
+ * pointed at it, and the shell does not wait. The
+ * table is fixed-size; ids are issued monotonically
+ * and never reused within a session. Reaping is
+ * prompt-time polling (SYS_TRYWAIT): before each
+ * interactive prompt the shell collects jobs whose
+ * stages have all finished and prints a completion
+ * notice. A reaped job's status never overwrites
+ * the foreground $? -- the launch line itself
+ * leaves $? = 0, and later foreground lines own
+ * the status from there. A job's reported status,
+ * here and in fg, is its first nonzero stage code,
+ * or 0 when every stage exited cleanly. */
+#define MAX_JOBS 8
+struct job {
+    int  used;
+    int  id;
+    long pgid;
+    int  npids;
+    long pids[128];
+    char line[128];
+};
+static struct job jobs_tab[MAX_JOBS];
+static int  next_job_id = 1;
+static int  bg_line;            /* current line ends in & */
+static const char *cur_line_g;  /* line text for job records */
+
+static int jobs_free_slot(void)
+{
+    for (int i = 0; i < MAX_JOBS; i++)
+        if (!jobs_tab[i].used) return i;
+    return -1;
+}
+
+/* Register a job; returns its id, or -1 if the
+ * table is full (callers check capacity before
+ * spawning, so -1 here is defensive only). */
+static int job_add(const long *pids, int npids, long pgid,
+                   const char *line)
+{
+    int s = jobs_free_slot();
+    if (s < 0) return -1;
+    struct job *j = &jobs_tab[s];
+    j->used = 1;
+    j->id = next_job_id++;
+    j->pgid = pgid;
+    j->npids = npids;
+    for (int i = 0; i < npids; i++) j->pids[i] = pids[i];
+    int li = 0;
+    if (line) {
+        while (line[li] && li < 127) { j->line[li] = line[li]; li++; }
+        while (li > 0 && (j->line[li - 1] == ' ' ||
+                          j->line[li - 1] == '\t')) li--;
+    }
+    j->line[li] = '\0';
+    return j->id;
+}
+
+static void job_notice(int id, long pid)
+{
+    char buf[24];
+    puts_u("["); puts_u(itoa(id, buf));
+    puts_u("] "); puts_u(itoa(pid, buf));
+    puts_u("\r\n");
+}
+
+static struct job *job_by_id(int id)
+{
+    for (int i = 0; i < MAX_JOBS; i++)
+        if (jobs_tab[i].used && jobs_tab[i].id == id)
+            return &jobs_tab[i];
+    return 0;
+}
+
+static struct job *job_most_recent(void)
+{
+    struct job *best = 0;
+    for (int i = 0; i < MAX_JOBS; i++)
+        if (jobs_tab[i].used &&
+            (!best || jobs_tab[i].id > best->id))
+            best = &jobs_tab[i];
+    return best;
+}
+
+/* Prompt-time reaping: collect every job whose
+ * stages have ALL finished, print its completion
+ * notice ([n] Done <line>, or [n] Exit <code>
+ * <line> with the job's first nonzero stage code),
+ * and free the slot. Running jobs are left alone;
+ * a stage's code is re-readable until collected
+ * here or by fg, so polling loses nothing. The
+ * foreground $? is deliberately untouched. */
+static void reap_jobs(void)
+{
+    char buf[24];
+    for (int i = 0; i < MAX_JOBS; i++) {
+        struct job *j = &jobs_tab[i];
+        if (!j->used) continue;
+        long firstnz = 0;
+        int done = 1;
+        for (int k = 0; k < j->npids; k++) {
+            long c = sys_trywait(j->pids[k]);
+            if (c == -2) { done = 0; break; }
+            if (c > 0 && !firstnz) firstnz = c;
+        }
+        if (!done) continue;
+        puts_u("["); puts_u(itoa(j->id, buf)); puts_u("] ");
+        if (firstnz) {
+            puts_u("Exit "); puts_u(itoa(firstnz, buf));
+            puts_u(" ");
+        } else {
+            puts_u("Done ");
+        }
+        puts_u(j->line); puts_u("\r\n");
+        j->used = 0;
+    }
+}
+
+/* Spawn one external program in the background
+ * (bare <prog>.elf ... & form): its own group,
+ * a job-table entry, the notice, no wait. Called
+ * from the executor layer, which owns last_status. */
+static void spawn_bg_single(const char *prog, const char *arg,
+                            const char *line)
+{
+    char cmdline[256];
+    int ci = 0;
+    for (int k = 0; prog[k] && ci < 250; k++) cmdline[ci++] = prog[k];
+    if (arg[0]) {
+        cmdline[ci++] = ' ';
+        for (int k = 0; arg[k] && ci < 254; k++) cmdline[ci++] = arg[k];
+    }
+    cmdline[ci] = '\0';
+    long pid = sys_exec(prog, cmdline);
+    if (pid < 0) {
+        puts_u("shell: cannot start: "); puts_u(prog);
+        puts_u("\r\n");
+        last_status = 1;
+        return;
+    }
+    sys_setpgid(pid, pid);
+    long pids[1];
+    pids[0] = pid;
+    int id = job_add(pids, 1, pid, line);
+    job_notice(id, pid);
+    last_status = 0;
+}
+
 /* One quote state machine for the whole shell (Phase 16
  * inc.4): the parser's scanner uses it to find word
  * boundaries and expand_str uses it to cook words, so the
@@ -1319,7 +1471,8 @@ static void dispatch_command(const char *cmd, const char *arg,
 static int is_session_cmd(const char *nm)
 {
     return streq(nm, "exec") || streq(nm, "exit") ||
-           streq(nm, "pf");
+           streq(nm, "pf") || streq(nm, "jobs") ||
+           streq(nm, "fg");
 }
 
 static int stage_needs_expand(int stage)
@@ -1621,6 +1774,28 @@ static int run_external_pipeline(void)
     if (nstages_g >= 2)
         for (int i = 0; i < nspawned; i++)
             sys_setpgid(pids[i], pids[0]);
+    if (bg_line) {
+        /* Background pipeline (Phase 18 inc.6): the
+         * stages already share their own group (pgid
+         * = pids[0]); the foreground record is NOT
+         * pointed at them and the shell does not
+         * wait -- the job is reaped at a later
+         * prompt. A part-spawned pipeline is instead
+         * collected right here and reported failed,
+         * exactly like the foreground path, so no
+         * job is ever left half-registered. */
+        if (failed || nspawned == 0) {
+            for (int i = 0; i < nspawned; i++)
+                sys_wait(pids[i]);
+            puts_u("shell: pipeline failed\r\n");
+            last_status = 1;
+            return 0;
+        }
+        int jid = job_add(pids, nspawned, pids[0], cur_line_g);
+        job_notice(jid, pids[0]);
+        last_status = 0;
+        return 0;
+    }
     /* Foreground record (Phase 18 inc.5): while the
      * pipeline runs, its shared group is foreground
      * (a single stage inherits the shell's group,
@@ -1643,6 +1818,7 @@ static int run_external_pipeline(void)
 
 static int run_pipeline(const char *line)
 {
+    cur_line_g = line;   /* for background job records */
     /* Pre-checks: nothing has run yet. */
     int aoff = 0;
     for (int s = 0; s < nstages_g; s++) {
@@ -1732,6 +1908,14 @@ static int run_pipeline(const char *line)
         }
         if (next > 0 && nbuilt > 0) {
             puts_u("shell: mixed builtin and external stages not supported\r\n");
+            last_status = 1;
+            return 0;
+        }
+        if (bg_line && nbuilt > 0) {
+            /* & backgrounds external work only: a
+             * builtin pipeline runs in-process and
+             * cannot be backgrounded (inc.6). */
+            puts_u("shell: & not supported for builtin pipelines\r\n");
             last_status = 1;
             return 0;
         }
@@ -1836,6 +2020,51 @@ static int execute_line(char *line, long n)
 {
     redir_restore();
 
+    /* Background marker (Phase 18 inc.6): a trailing
+     * standalone & -- unquoted, the last non-space
+     * character of the line, and a token of its own --
+     * marks the line background. It is stripped here,
+     * before parsing, so every downstream consumer
+     * (the parser, dispatch, the job table's stored
+     * line text) sees the line without it. && and a
+     * lone & are named errors; a standalone & in any
+     * other position is caught on the raw stage words
+     * after the parse. An & inside a word (a&b) or
+     * inside quotes stays ordinary text, as before. */
+    bg_line = 0;
+    {
+        int q = 0;
+        long amp = -1;
+        for (long i = 0; i < n; i++) {
+            char c = line[i];
+            if (q == 0 && (c == '\'' || c == '"')) q = c;
+            else if (q != 0 && c == q) q = 0;
+            else if (q == 0 && c == '&') amp = i;
+        }
+        if (amp >= 0) {
+            int trailing = 1;
+            for (long j = amp + 1; j < n; j++)
+                if (line[j] != ' ' && line[j] != '\t') trailing = 0;
+            if (trailing) {
+                long b = amp - 1;
+                while (b >= 0 && (line[b] == ' ' || line[b] == '\t')) b--;
+                if (b >= 0 && line[b] == '&') {
+                    puts_u("shell: '&&' not supported\r\n");
+                    last_status = 1;
+                    return 0;
+                }
+                if (b < 0) {
+                    puts_u("shell: '&' with no command\r\n");
+                    last_status = 1;
+                    return 0;
+                }
+                bg_line = 1;
+                line[amp] = '\0';
+                n = amp;
+            }
+        }
+    }
+
     /* Parse the line (Phase 14 inc.4). A plain command
      * feeds the dispatch chain below with cmd/arg as the
      * old first-space split produced them, with ONE
@@ -1865,7 +2094,37 @@ static int execute_line(char *line, long n)
      * Placed before the script session-command check: exit=1
      * is a variable, not the exit command (that check compares
      * whole names, and this word is not one). */
-    if (nstages_g == 1 && !redirect_g && stg_argc[0] == 1) {
+    /* A standalone & that survived the scan was not
+     * the line's last word: refuse it by name rather
+     * than letting it reach a program as a surprising
+     * argument (inc.6). The check runs on the RAW
+     * stage words, so a quoted "&" or a word merely
+     * containing & is untouched. */
+    for (int s = 0; s < nstages_g; s++) {
+        int aoff = 0;
+        for (int t = 0; t < s; t++) aoff += stg_argc[t] + 1;
+        for (int k = 0; k < stg_argc[s]; k++) {
+            if (streq(stg_argv[aoff + k], "&")) {
+                puts_u("shell: '&' must end the line\r\n");
+                last_status = 1;
+                return 0;
+            }
+        }
+    }
+    if (bg_line && redirect_g) {
+        puts_u("shell: & not supported with redirection\r\n");
+        last_status = 1;
+        return 0;
+    }
+    if (bg_line && jobs_free_slot() < 0) {
+        /* Capacity is checked before anything spawns,
+         * for every background form (inc.6). */
+        puts_u("shell: job table full\r\n");
+        last_status = 1;
+        return 0;
+    }
+
+    if (nstages_g == 1 && !redirect_g && stg_argc[0] == 1 && !bg_line) {
         int ar = var_try_assign(stg_argv[0]);
         if (ar) {
             /* An assignment line's status is the assignment's
@@ -2008,6 +2267,25 @@ static int execute_line(char *line, long n)
         last_status = 1;
         return 0;
     }
+    if (bg_line) {
+        /* Background single command (inc.6): only an
+         * external program can be backgrounded. The
+         * exec form falls through to dispatch, whose
+         * exec branch backgrounds the child; a bare
+         * <prog>.elf line spawns directly here.
+         * Anything else is refused by name. */
+        if (streq(cmd, "exec")) {
+            /* fall through to dispatch */
+        } else if (slen_u(cmd) >= 4 &&
+                   streq(cmd + slen_u(cmd) - 4, ".elf")) {
+            spawn_bg_single(cmd, arg, line);
+            return 0;
+        } else {
+            puts_u("shell: & requires an external command\r\n");
+            last_status = 1;
+            return 0;
+        }
+    }
     if (redirect_g) {
         if (streq(cmd, "exec")) {
             puts_u("shell: redirection not supported for exec\r\n");
@@ -2102,8 +2380,9 @@ void _start(long argc, char **argv)
         long n = readline(line, 256);
         if (n <= 0) continue;
         if (n > 0 && line[n-1] == '\n') line[--n] = '\0';
-        if (n == 0) { puts_u("> "); continue; }
+        if (n == 0) { reap_jobs(); puts_u("> "); continue; }
         int fl = execute_line(line, n);
+        reap_jobs();
         puts_u(fl == 1 ? "\r\n> " : "> ");
     }
 }
@@ -2410,7 +2689,68 @@ static void dispatch_command(const char *cmd, const char *arg,
     }
 
     if (streq(cmd, "help")) {
-        puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, rm, mv, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, clear, exit\r\n");
+        puts_u("commands: ls, cat <file>, date, exec <prog> [arg...], getpid, sched, trace, policy <0|1|2>, pftrace, pfpolicy <0|1>, iotrace, acctrace, bcachestat, dmastat, wstat, sync, write, append, rm, mv, netstat, netsend, ping, dhcp, nslookup, tcpecho, httpget, prefetch <0|1|2|3|4>, pfweights, memtest, pf, jobs, fg, clear, exit\r\n");
+        return;
+    }
+
+    if (streq(cmd, "jobs")) {
+        /* Background jobs not yet reaped (inc.6).
+         * Completion is reported at prompts, so in
+         * practice every listed job is still running;
+         * a job that finished since the last prompt
+         * would show here until the next reap. */
+        char jbuf[24];
+        for (int i = 0; i < MAX_JOBS; i++) {
+            struct job *j = &jobs_tab[i];
+            if (!j->used) continue;
+            puts_u("["); puts_u(itoa(j->id, jbuf));
+            puts_u("] Running pgid=");
+            puts_u(itoa(j->pgid, jbuf)); puts_u(" ");
+            puts_u(j->line); puts_u("\r\n");
+        }
+        return;
+    }
+
+    if (streq(cmd, "fg")) {
+        /* fg | fg %n | fg n (inc.6): foreground a
+         * background job -- point the foreground
+         * record at the job's group, wait for every
+         * stage through the ordinary SYS_WAIT path,
+         * restore the shell's group on the way out,
+         * and drop the job from the table (an fg'd
+         * job gets no Done notice later). The
+         * collected status reaches $? through the
+         * exec stash, with the inc-003 rule (signal
+         * death -> $? = 1). While fg waits, Ctrl-C
+         * kills the job's group and spares the shell
+         * (inc-005 delivery; the shell is the
+         * recorded setter). */
+        struct job *j = 0;
+        if (!arg[0]) {
+            j = job_most_recent();
+            if (!j) { puts_u("fg: no current job\r\n"); return; }
+        } else {
+            const char *a = arg;
+            if (a[0] == '%') a++;
+            int id = 0, ok = a[0] != '\0';
+            for (int k = 0; ok && a[k]; k++) {
+                if (a[k] < '0' || a[k] > '9') { ok = 0; break; }
+                id = id * 10 + (a[k] - '0');
+            }
+            if (!ok) { puts_u("fg: usage: fg [%n]\r\n"); return; }
+            j = job_by_id(id);
+            if (!j) { puts_u("fg: no such job\r\n"); return; }
+        }
+        puts_u(j->line); puts_u("\r\n");
+        sys_setfg(j->pgid);
+        long code = 0;
+        for (int i = 0; i < j->npids; i++) {
+            long c = sys_wait(j->pids[i]);
+            if (c != 0 && code == 0) code = c;
+        }
+        sys_setfg(sys_getpgid(0));   /* prompt state restored */
+        j->used = 0;
+        exec_child_code = code;
         return;
     }
 
@@ -2443,6 +2783,22 @@ static void dispatch_command(const char *cmd, const char *arg,
         prog[pi2] = 0;
         long pid = sys_exec(prog, arg);
         if (pid < 0) { puts_u("exec: failed\r\n"); return; }
+        if (bg_line) {
+            /* exec <prog> ... & (Phase 18 inc.6): the
+             * child gets its OWN group, a job-table
+             * entry and the notice; the foreground
+             * record stays at the shell's group and
+             * there is no wait. The launch itself is
+             * the line's outcome: stash 0 so the
+             * executor leaves $? = 0. */
+            sys_setpgid(pid, pid);
+            long jp[1];
+            jp[0] = pid;
+            int jid = job_add(jp, 1, pid, line);
+            job_notice(jid, pid);
+            exec_child_code = 0;
+            return;
+        }
         /* The child shares this shell's group, which
          * is therefore the foreground group while it
          * runs; delivery spares the setter (us), so a

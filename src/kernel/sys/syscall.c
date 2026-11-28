@@ -542,6 +542,22 @@ static int64_t sys_setfg(uint64_t pgid)
     return 0;
 }
 
+/* SYS_TRYWAIT (Phase 18 inc.6): the WNOHANG analogue
+ * of SYS_WAIT, for the shell's prompt-time job
+ * reaping. Returns the child's exit code if it is
+ * DEAD (repeatable, like SYS_WAIT -- task slots are
+ * never reaped), -2 (E_WOULDBLOCK) if it is still
+ * running, and -1 if the pid is not the caller's
+ * child. A single state read; no lock needed. */
+static int64_t sys_trywait(uint64_t pid)
+{
+    struct task *cur = sched_current_task();
+    struct task *t = sched_find_by_pid((uint32_t)pid);
+    if (!cur || !t || t->parent_pid != cur->pid) return -1;
+    if (t->state != TASK_DEAD) return -2;
+    return t->exit_code;
+}
+
 /* SYS_SBRK: sbrk(increment)
  * Grows (or queries, if increment==0) the calling task's heap.
  * Returns the old break on success, -1 on failure (OOM).
@@ -1437,6 +1453,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_GETPGID: return sys_getpgid(arg1);
     case SYS_SETPGID: return sys_setpgid(arg1, arg2);
     case SYS_SETFG:   return sys_setfg(arg1);
+    case SYS_TRYWAIT: return sys_trywait(arg1);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);
