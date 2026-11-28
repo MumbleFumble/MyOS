@@ -56,7 +56,16 @@
 #define SYS_DUP2 43        /* dup2(oldfd, newfd) -> newfd or -1 (Phase 14) */
 #define SYS_EXEC_INHERIT 45 /* exec_inherit(name, cmdline, map) -> child pid */
 #define SYS_PIPE 44        /* pipe(fds_out) -> 0 or -1 (Phase 14) */
-#define SYS_KILL 46        /* kill(pid) -> 0 or -1 (Phase 18) */
+#define SYS_KILL 46        /* kill(pid, sig) -> 0 or -1 (Phase 18) */
+
+/* Signal vocabulary (Phase 18 inc.3): the only signals
+ * SYS_KILL accepts. POSIX numbers. Every one of them
+ * terminates the target in this phase -- there are no
+ * handlers, no masks and no stop/continue. Mirrored in
+ * src/lib/syscall.h. */
+#define SIGINT   2
+#define SIGKILL  9
+#define SIGTERM 15
 
 /* Scheduling policy indices for SYS_SETPOLICY */
 #define SCHED_POLICY_RR  0   /* round-robin (default)   */

@@ -86,7 +86,7 @@ typedef struct {
 long sys_write(long fd, const void *buf, long count);
 long sys_read(long fd, void *buf, long count);
 void sys_exit(long status) __attribute__((noreturn));
-long sys_kill(long pid);
+long sys_kill(long pid, long sig);
 void *sys_sbrk(long increment);
 void  sys_clear(void);
 long  sys_getpid(void);
@@ -188,10 +188,19 @@ long sys_dup2(long oldfd, long newfd);
  * in the kernel's sched.h. */
 #define EXIT_FAULT 4000
 
-/* Exit status of a task terminated by SYS_KILL
- * (Phase 18 inc.2). Mirrors EXIT_KILLED in
- * src/kernel/proc/sched.h. */
-#define EXIT_KILLED 4001
+/* Signal-death status band (Phase 18 inc.3): a task
+ * terminated by SYS_KILL with signal sig collects
+ * EXIT_SIGNAL_BASE + sig. Mirrors EXIT_SIGNAL_BASE in
+ * src/kernel/proc/sched.h; replaces inc.2's
+ * EXIT_KILLED 4001, which no path produces now. */
+#define EXIT_SIGNAL_BASE 4096
+
+/* Signal vocabulary for sys_kill (Phase 18 inc.3):
+ * POSIX numbers, the only signals this kernel knows.
+ * All terminate the target; there are no handlers. */
+#define SIGINT   2
+#define SIGKILL  9
+#define SIGTERM 15
 
 /* A core syscall's user pointer was refused by the
  * kernel's validated copy layer (Phase 17 inc.3). Mirrors

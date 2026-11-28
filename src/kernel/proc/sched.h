@@ -16,13 +16,17 @@
  * programs in src/lib/syscall.h. */
 #define EXIT_FAULT  4000
 
-/* Exit code recorded for a task terminated by SYS_KILL
- * (Phase 18 inc.2). Sibling to EXIT_FAULT; like it,
- * spoofable by a program that exits with the same value
- * (this kernel's wait returns the raw int32; the
- * distinctiveness is against the tree's real exit codes).
+/* Signal-death status band (Phase 18 inc.3): a task
+ * terminated by SYS_KILL with signal sig collects
+ * EXIT_SIGNAL_BASE + sig, so a waiter can tell a
+ * signal death from a voluntary exit and from
+ * EXIT_FAULT, and can tell WHICH signal. Replaces
+ * inc.2's flat EXIT_KILLED 4001, which no path
+ * produces any more (SYS_KILL always carries a
+ * signal now). Like EXIT_FAULT, the band is spoofable
+ * by a program exiting with the same value.
  * Mirrored for user programs in src/lib/syscall.h. */
-#define EXIT_KILLED 4001
+#define EXIT_SIGNAL_BASE 4096
 
 /* Maximum open file descriptors per task. fds 0/1/2 are stdin/stdout/stderr. */
 #define MAX_FDS  16
@@ -149,12 +153,15 @@ void sched_tick(uint64_t tick);
 void sched_current_exit(void);
 
 /* Terminate the task with the given pid on behalf of
- * another task (Phase 18 inc.2, SYS_KILL): marks it DEAD
- * with EXIT_KILLED, wakes its waiters and tears down its
- * fds, all in one cli section. Returns 0, or -1 when the
- * pid does not exist, is already DEAD, or names a kernel
- * task (cr3 == 0). Never handles the caller itself. */
-int sched_kill_task(uint32_t pid);
+ * another task (Phase 18 inc.2, SYS_KILL; inc.3 added
+ * the signal): marks it DEAD with EXIT_SIGNAL_BASE +
+ * sig, wakes its waiters and tears down its fds, all
+ * in one cli section. Returns 0, or -1 when the pid
+ * does not exist, is already DEAD, or names a kernel
+ * task (cr3 == 0). Never handles the caller itself.
+ * The caller (sys_kill) has already validated sig
+ * against the signal vocabulary. */
+int sched_kill_task(uint32_t pid, int sig);
 
 /*
  * Create a ring-3 task from a pre-loaded ELF result.

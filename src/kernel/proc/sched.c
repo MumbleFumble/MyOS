@@ -280,7 +280,7 @@ void sched_current_exit(void)
  * sys_kill routes self-kill through the exit path.
  * There is no permission model: any task may kill any
  * user task (this kernel's tradition). */
-int sched_kill_task(uint32_t pid)
+int sched_kill_task(uint32_t pid, int sig)
 {
     uint64_t rflags;
     __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
@@ -290,7 +290,7 @@ int sched_kill_task(uint32_t pid)
         if (rflags & 0x200) __asm__ volatile("sti");
         return -1;
     }
-    t->exit_code = EXIT_KILLED;
+    t->exit_code = EXIT_SIGNAL_BASE + sig;
     t->state     = TASK_DEAD;
     sched_wake_waiters(pid);
     fd_teardown_task(t);

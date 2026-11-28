@@ -4,21 +4,21 @@
  *
  * Cases (orchestrator mode, no arguments):
  *  1. A spawned spinner (hostileprobe.elf spin) is
- *     killed and collected as exactly EXIT_KILLED 4001.
+ *     killed and collected as exactly EXIT_SIGNAL_BASE + SIGKILL (4105).
  *  2. kill of a nonexistent pid returns -1.
  *  3. kill of an already-DEAD pid returns -1 and the
  *     dead task's collected status is unchanged.
- *  4. kill(self) collects 4001 (the selfkill mode
+ *  4. kill(self) collects 4105 (the selfkill mode
  *     below; it must never return from sys_kill).
  *  5. EOF-on-kill: fdchild.elf inherits a pipe write
  *     end; while it lives a read on the harness's end
  *     returns E_WOULDBLOCK (not EOF); after SYS_KILL
  *     the read returns EOF, because the kill's fd
  *     teardown released the writer's last alias; the
- *     writer collects 4001.
+ *     writer collects 4105.
  *  6. A task blocked in SYS_WAIT (the waiter mode
  *     below, waiting on a spinner) is killed and
- *     collected as 4001; it must never resume (it
+ *     collected as 4105; it must never resume (it
  *     prints WAITER-RESURRECTED if its wait ever
  *     returns, which the host test greps for == 0).
  *
@@ -50,7 +50,7 @@ void _start(long argc, char **argv)
 {
     if (argc >= 2 && argv[1][0] == 's') {
         /* selfkill: kill(self) must never return. */
-        sys_kill(sys_getpid());
+        sys_kill(sys_getpid(), SIGKILL);
         puts1("killtest: FAIL selfkill returned\r\n");
         sys_exit(9);
     }
@@ -66,23 +66,23 @@ void _start(long argc, char **argv)
         sys_exit(3);
     }
 
-    /* 1. Killed spinner collects exactly 4001. */
+    /* 1. Killed spinner collects exactly 4105. */
     long spin = sys_exec("hostileprobe.elf", "hostileprobe.elf spin");
     check(spin > 0, "spawn spinner");
-    check(sys_kill(spin) == 0, "spinner kill rc");
-    check(sys_wait(spin) == EXIT_KILLED, "spinner 4001");
+    check(sys_kill(spin, SIGKILL) == 0, "spinner kill rc");
+    check(sys_wait(spin) == EXIT_SIGNAL_BASE + SIGKILL, "spinner 4105");
 
     /* 2. Nonexistent pid. */
-    check(sys_kill(9999) == -1, "badpid");
+    check(sys_kill(9999, SIGKILL) == -1, "badpid");
 
     /* 3. Already-DEAD pid: -1, status unchanged. */
     long done = sys_exec("argtest.elf", "argtest.elf one two");
     check(sys_wait(done) == 0, "argtest exit 0");
-    check(sys_kill(done) == -1 && sys_wait(done) == 0, "deadpid");
+    check(sys_kill(done, SIGKILL) == -1 && sys_wait(done) == 0, "deadpid");
 
-    /* 4. kill(self) collects 4001. */
+    /* 4. kill(self) collects 4105. */
     long self = sys_exec("killtest.elf", "killtest.elf selfkill");
-    check(sys_wait(self) == EXIT_KILLED, "selfkill 4001");
+    check(sys_wait(self) == EXIT_SIGNAL_BASE + SIGKILL, "selfkill 4105");
 
     /* 5. EOF-on-kill (fdchild reuses the inc.5 fixture). */
     long P[2], Q[2];
@@ -98,9 +98,9 @@ void _start(long argc, char **argv)
     sys_close(P[0]);
     char buf[8];
     check(sys_read(Q[0], buf, 1) == -2, "no eof before kill");
-    check(sys_kill(writer) == 0, "writer kill rc");
+    check(sys_kill(writer, SIGKILL) == 0, "writer kill rc");
     check(sys_read(Q[0], buf, 1) == 0, "eof after kill");
-    check(sys_wait(writer) == EXIT_KILLED, "writer 4001");
+    check(sys_wait(writer) == EXIT_SIGNAL_BASE + SIGKILL, "writer 4105");
 
     /* 6. Killed WAITING task never resumes. The waiter
      * spawns its own spinner and blocks waiting on it.
@@ -117,10 +117,10 @@ void _start(long argc, char **argv)
     volatile long sink = 0;
     for (long k = 0; k < 100000000L; k++) sink += k;
     (void)sink;
-    check(sys_kill(waiter) == 0, "waiting kill rc");
-    check(sys_wait(waiter) == EXIT_KILLED, "waiting 4001");
-    check(sys_kill(waiter + 1) == 0, "waiters spinner kill rc");
-    check(sys_kill(waiter + 1) == -1, "waiters spinner dead");
+    check(sys_kill(waiter, SIGKILL) == 0, "waiting kill rc");
+    check(sys_wait(waiter) == EXIT_SIGNAL_BASE + SIGKILL, "waiting 4105");
+    check(sys_kill(waiter + 1, SIGKILL) == 0, "waiters spinner kill rc");
+    check(sys_kill(waiter + 1, SIGKILL) == -1, "waiters spinner dead");
 
     if (fails == 0) puts1("killtest: ALL PASS\r\n");
     else puts1("killtest: FAILURES\r\n");

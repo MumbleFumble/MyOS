@@ -467,25 +467,31 @@ static int64_t sys_exit(uint64_t status)
     __builtin_unreachable();
 }
 
-/* SYS_KILL: kill(pid) -> 0 / -1 (Phase 18 inc.2). Ends
- * the target with EXIT_KILLED, collected through
- * SYS_WAIT. No permission model: any task may kill any
+/* SYS_KILL: kill(pid, sig) -> 0 / -1 (Phase 18 inc.2;
+ * inc.3 added the signal). The target collects
+ * EXIT_SIGNAL_BASE + sig through SYS_WAIT. The signal
+ * is validated FIRST, before any state is touched --
+ * including before the self-kill branch, so an invalid
+ * signal can never terminate anything, not even the
+ * caller. No permission model: any task may kill any
  * user task; kernel tasks are refused inside
- * sched_kill_task. Self-kill is exit with EXIT_KILLED,
- * through the same cli + teardown discipline as
- * sys_exit. */
-static int64_t sys_kill(uint64_t pid)
+ * sched_kill_task. Self-kill is exit with the encoded
+ * status, through the same cli + teardown discipline
+ * as sys_exit. */
+static int64_t sys_kill(uint64_t pid, uint64_t sig)
 {
+    if (sig != SIGINT && sig != SIGKILL && sig != SIGTERM)
+        return -1;
     struct task *cur = sched_current_task();
     if (cur && (uint32_t)pid == cur->pid) {
         __asm__ volatile("cli");
-        cur->exit_code = EXIT_KILLED;
+        cur->exit_code = EXIT_SIGNAL_BASE + (int32_t)sig;
         fd_teardown_task(cur);
         sched_current_exit();
         for (;;) __asm__ volatile("hlt");
         __builtin_unreachable();
     }
-    return sched_kill_task((uint32_t)pid);
+    return sched_kill_task((uint32_t)pid, (int)sig);
 }
 
 /* SYS_SBRK: sbrk(increment)
@@ -1379,7 +1385,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg
     case SYS_BCACHE_PROBE: return sys_bcache_probe(arg1);
     case SYS_DUP2:    return sys_dup2(arg1, arg2);
     case SYS_PIPE:    return sys_pipe(arg1);
-    case SYS_KILL:    return sys_kill(arg1);
+    case SYS_KILL:    return sys_kill(arg1, arg2);
     case SYS_CLOSE:   return sys_close(arg1);
     case SYS_READDIR: return sys_readdir(arg1, arg2);
     case SYS_TIME:    return sys_time(arg1);

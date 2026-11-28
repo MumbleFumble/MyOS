@@ -924,6 +924,15 @@ static int var_find(const char *name, long len)
  * inside a builtin: see the contract on dispatch_command. */
 static int last_status;
 
+/* Collected exit code of the child run by the exec
+ * builtin (Phase 18 inc.3), or -1 when the current
+ * dispatch ran no exec. The builtin only STASHES the
+ * code here; the executor (execute_line's plain path)
+ * translates it into last_status after dispatch
+ * returns, keeping the status write in the shell's
+ * own layer per the contract below. */
+static long exec_child_code = -1;
+
 /* One quote state machine for the whole shell (Phase 16
  * inc.4): the parser's scanner uses it to find word
  * boundaries and expand_str uses it to cook words, so the
@@ -2034,10 +2043,16 @@ static int execute_line(char *line, long n)
          * after dispatch lowers it again, so a `run` line
          * leaves its last script line's status standing. */
         last_status = 0;
+        exec_child_code = -1;
         dispatch_command(cmd, arg, xline, (long)slen_u(xline));
+        if (exec_child_code >= 0)
+            last_status = exec_child_code ? 1 : 0;
     } else {
         last_status = 0;
+        exec_child_code = -1;
         dispatch_command(cmd, arg, line, n);
+        if (exec_child_code >= 0)
+            last_status = exec_child_code ? 1 : 0;
     }
     return prompt_nl;
 }
@@ -2140,10 +2155,15 @@ static void cmd_run(const char *arg)
  * by the shell's layers, never by a builtin. Every caller
  * sets last_status = 0 at the moment it commits to
  * dispatching (execute_line's plain and redirect paths,
- * run_pipeline before its stage loop), and NOTHING
- * assigns it after dispatch returns -- so a `run` line
- * leaves its last script line's status standing, and a
- * pipeline keeps 1 if ANY stage failed. The one write
+ * run_pipeline before its stage loop). One executor
+ * write happens after dispatch returns: execute_line's
+ * plain path translates the exec builtin's stashed
+ * child code (exec_child_code) into last_status --
+ * 0 for a clean exit, 1 for any nonzero, fault or
+ * signal death (Phase 18 inc.3) -- so a `run` line
+ * still leaves its last script line's status standing
+ * (exec is refused in scripts), and a pipeline keeps 1
+ * if ANY stage failed. The one write
  * inside this function is the echo fallback's: an unknown
  * command is the dispatch layer's own failure, so it
  * raises last_status to 1. Builtin-reported failures
@@ -2391,7 +2411,12 @@ static void dispatch_command(const char *cmd, const char *arg,
         prog[pi2] = 0;
         long pid = sys_exec(prog, arg);
         if (pid < 0) { puts_u("exec: failed\r\n"); return; }
-        sys_wait(pid);
+        /* Stash the collected code; the executor turns
+         * it into $? after dispatch (see exec_child_code).
+         * A spawn failure above leaves the stash at -1:
+         * no child existed, and the line's status is
+         * unchanged from the pre-inc.3 behaviour. */
+        exec_child_code = sys_wait(pid);
        
         return;
     }

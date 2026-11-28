@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Phase 18 inc.2: SYS_KILL + fd teardown on death.
 # killtest.elf orchestrates: a killed spinner collects
-# exactly 4001; bad-pid and already-DEAD kills return
+# exactly 4105 (EXIT_SIGNAL_BASE + SIGKILL); bad-pid and already-DEAD kills return
 # -1 with the dead status unchanged; kill(self)
-# collects 4001; a killed pipe writer delivers EOF
+# collects 4105; a killed pipe writer delivers EOF
 # only at its death (teardown), never before; a task
-# blocked in SYS_WAIT is killed, collects 4001 and
+# blocked in SYS_WAIT is killed, collects 4105 and
 # never resumes (its resurrection marker must appear
 # 0 times). Fixtures reused unmodified: hostileprobe
 # (spinner), fdchild (inherited writer), argtest.
@@ -81,5 +81,5 @@ type_word "frobnicate k1"
 wait_for_count "frobnicate k1" 1 || fail "shell not alive after killtest"
 check "> " 3
 
-echo "[test] PASS: SYS_KILL collects 4001, EOF lands on kill, no resurrection"
+echo "[test] PASS: SYS_KILL collects 4105, EOF lands on kill, no resurrection"
 exit 0
